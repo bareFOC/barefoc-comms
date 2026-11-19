@@ -38,7 +38,11 @@ pub use server::{
     Endpoint, FibreServer, ProcessFramedError, PropertyHandler, RawReadFn, RawWriteFn, ServerError,
 };
 
-pub use odrive::{create_odrive_schema, BAREFOC_ODRIVE_JSON};
+pub use odrive::{
+    create_4axis_kinematics_schema, create_odrive_schema, make_4axis_assembly_endpoints,
+    ActuatorAssembly, AxisState, CalibState, JointState, BAREFOC_4AXIS_KINEMATICS_JSON,
+    BAREFOC_ODRIVE_JSON,
+};
 
 #[cfg(feature = "barefoc")]
 pub use odrive::{make_axis_context_endpoints, make_motor_config_endpoints, BareFocAxisContext};
