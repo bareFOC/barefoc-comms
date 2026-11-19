@@ -609,11 +609,7 @@ impl MotorCommander {
         verbose: VerboseMode,
     ) -> Result<(), W::Error> {
         if verbose != VerboseMode::nothing {
-            if verbose == VerboseMode::user_friendly {
-                writer.write_all(b"err\r\n")?;
-            } else {
-                writer.write_all(b"err\r\n")?;
-            }
+            writer.write_all(b"err\r\n")?;
         }
         Ok(())
     }
@@ -637,7 +633,11 @@ impl MotorCommander {
             CMD_INDUCTANCE => writer.write_all(b"L phase: ")?,
             CMD_KV_RATING => writer.write_all(b"Motor KV: ")?,
             _ => {
-                if user_cmd.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-' || c == '+') {
+                if user_cmd
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+')
+                {
                     writer.write_all(b"Target: ")?;
                 }
             }
@@ -697,10 +697,10 @@ mod tests {
         assert_eq!(res, 12.25);
         assert_eq!(config.target, 12.25);
 
-        // Negative bare float '-3.14'
-        let res = MotorCommander::handle(&mut config, "-3.14").unwrap();
-        assert_eq!(res, -3.14);
-        assert_eq!(config.target, -3.14);
+        // Negative bare float '-3.5'
+        let res = MotorCommander::handle(&mut config, "-3.5").unwrap();
+        assert_eq!(res, -3.5);
+        assert_eq!(config.target, -3.5);
 
         // Target with velocity limit
         MotorCommander::handle(&mut config, "T50.0 10.0").unwrap();

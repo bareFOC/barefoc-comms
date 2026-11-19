@@ -134,8 +134,7 @@ impl<const BUF_SIZE: usize> LineProcessor<BUF_SIZE> {
         }
 
         let mut lines_processed = 0;
-        for i in 0..bytes_read {
-            let b = chunk[i];
+        for &b in &chunk[..bytes_read] {
             if self.echo {
                 writer.write_all(&[b]).map_err(StreamError::Write)?;
             }

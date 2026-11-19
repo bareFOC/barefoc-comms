@@ -21,7 +21,7 @@ pub const CMD_VERBOSE: char = '@';
 pub const CMD_DECIMAL: char = '#';
 
 /// Verbose display mode matching upstream SimpleFOC `VerboseMode`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum VerboseMode {
     /// Display nothing (good for telemetry / bandwidth constrained monitoring).
@@ -29,15 +29,10 @@ pub enum VerboseMode {
     /// Display only numerical outputs on user request.
     on_request = 0x01,
     /// Display human-readable textual messages and prefixes.
+    #[default]
     user_friendly = 0x02,
     /// Display machine-readable formatted output.
     machine_readable = 0x03,
-}
-
-impl Default for VerboseMode {
-    fn default() -> Self {
-        Self::user_friendly
-    }
 }
 
 /// Command callback function pointer.
@@ -287,7 +282,7 @@ impl<const N: usize> Commander<N> {
 }
 
 /// Helper function to format a `u8` into a byte buffer without std.
-pub fn write_u8<'a>(mut val: u8, buf: &'a mut [u8; 10]) -> &'a str {
+pub fn write_u8(mut val: u8, buf: &mut [u8; 10]) -> &str {
     if val == 0 {
         buf[0] = b'0';
         return core::str::from_utf8(&buf[0..1]).unwrap_or("0");
