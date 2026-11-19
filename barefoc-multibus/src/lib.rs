@@ -52,7 +52,10 @@ extern crate std;
 #[cfg(feature = "simplefoc-profile")]
 pub mod profile;
 #[cfg(feature = "simplefoc-profile")]
-pub use profile::{refresh_telemetry, simplefoc_profile};
+pub use profile::{
+    multi_motor_profile, refresh_telemetry, refresh_telemetry_multi, simplefoc_profile,
+    MultiMotorState, REG_MOTOR_SELECT,
+};
 
 pub mod client;
 pub mod table;

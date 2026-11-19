@@ -19,12 +19,12 @@ embedded-hal-mock = "0.10"
 barefoc-drivers = { path = "../../barefoc-drivers/barefoc-drivers", default-features = false }
 
 [features]
-default = ["std"]
+default = ["std", "simplefoc-profile"]
 # Host builds/tests. The library itself never links std.
-std = []
+std = ["simplefoc-profile", "barefoc-drivers?/std"]
 defmt = ["dep:defmt"]
 # SimpleFOC register bridge: pulls barefoc-drivers for RegisterId/RegisterValue/RegisterBridge.
-simplefoc-profile = ["dep:barefoc-drivers", "dep:barefoc", "barefoc-drivers?/std"]
+simplefoc-profile = ["dep:barefoc-drivers", "dep:barefoc"]
 # Kinematics register bridge: enables barefoc-drivers/kinematics feature (Actuator1Dof impl).
 kinematics = ["simplefoc-profile", "barefoc-drivers/kinematics"]
 
