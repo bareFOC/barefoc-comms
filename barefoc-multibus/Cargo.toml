@@ -9,7 +9,7 @@ description = "Portable no_std descriptor-driven register-map (control table) se
 
 [dependencies]
 embedded-hal = { workspace = true }
-barefoc = { path = "../../barefoc", default-features = false, optional = true }
+barefoc = { path = "../../bareFOC", default-features = false, optional = true }
 barefoc-drivers = { path = "../../barefoc-drivers/barefoc-drivers", default-features = false, optional = true }
 defmt = { workspace = true, optional = true }
 
