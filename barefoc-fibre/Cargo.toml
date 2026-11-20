@@ -8,12 +8,13 @@ rust-version.workspace = true
 description = "Pure-Rust, no_std Fibre RPC protocol implementation compatible with ODrive GUI and odrivetool."
 
 [dependencies]
-barefoc = { path = "../../bareFOC", default-features = false, optional = true }
+barefoc = { path = "../../bareFOC", default-features = false, features = ["boot"], optional = true }
 embedded-io = { workspace = true, optional = true }
 defmt = { workspace = true, optional = true }
 
 [dev-dependencies]
-barefoc = { path = "../../bareFOC", default-features = false }
+barefoc = { path = "../../bareFOC", default-features = false, features = ["boot"] }
+
 
 [features]
 default = ["std", "barefoc", "embedded-io"]

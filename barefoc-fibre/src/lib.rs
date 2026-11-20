@@ -20,6 +20,9 @@ pub mod framing;
 pub mod schema;
 pub mod server;
 pub mod odrive;
+#[cfg(feature = "barefoc")]
+pub mod servo;
+
 
 pub use crc::{
     calc_crc16, calc_crc16_buffer, calc_crc8, calc_crc8_buffer, CANONICAL_CRC16_INIT,
@@ -46,3 +49,9 @@ pub use odrive::{
 
 #[cfg(feature = "barefoc")]
 pub use odrive::{make_axis_context_endpoints, make_motor_config_endpoints, BareFocAxisContext};
+#[cfg(feature = "barefoc")]
+pub use servo::{
+    create_smart_servo_endpoints, create_smart_servo_schema, SmartServoFibreContext,
+    BAREFOC_SMART_SERVO_JSON,
+};
+

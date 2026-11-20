@@ -57,6 +57,12 @@ pub use profile::{
     MultiMotorState, REG_MOTOR_SELECT,
 };
 
+#[cfg(feature = "control-table")]
+pub mod control_table_profile;
+#[cfg(feature = "control-table")]
+pub use control_table_profile::{control_table_profile, ControlTableContext};
+
+
 pub mod client;
 pub mod table;
 pub mod transport;

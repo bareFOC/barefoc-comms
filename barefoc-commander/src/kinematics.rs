@@ -307,8 +307,7 @@ impl KinematicsCommander {
                     if j >= 4 {
                         return Err(KinematicsCommandError::InvalidIndex(j));
                     }
-                    let rad = tok2
-                        .parse::<f32>()
+                    let rad = crate::parse_f32(tok2)
                         .map_err(|_| KinematicsCommandError::InvalidValue)?;
                     config.joint_targets[j] = rad;
                     Ok(config.joint_targets[j])
@@ -318,8 +317,7 @@ impl KinematicsCommander {
                             return Ok(config.joint_targets[j]);
                         }
                     }
-                    let rad = tok1
-                        .parse::<f32>()
+                    let rad = crate::parse_f32(tok1)
                         .map_err(|_| KinematicsCommandError::InvalidValue)?;
                     config.joint_targets[0] = rad;
                     Ok(config.joint_targets[0])
@@ -341,8 +339,7 @@ impl KinematicsCommander {
                         return Err(KinematicsCommandError::InvalidIndex(idx));
                     }
                     if let Some(tok2) = tokens.next() {
-                        let rad = tok2
-                            .parse::<f32>()
+                        let rad = crate::parse_f32(tok2)
                             .map_err(|_| KinematicsCommandError::InvalidValue)?;
                         config.joint_angles[idx] = rad;
                     }
@@ -366,8 +363,7 @@ impl KinematicsCommander {
                         return Err(KinematicsCommandError::InvalidIndex(idx));
                     }
                     if let Some(tok2) = tokens.next() {
-                        let vel = tok2
-                            .parse::<f32>()
+                        let vel = crate::parse_f32(tok2)
                             .map_err(|_| KinematicsCommandError::InvalidValue)?;
                         config.joint_velocities[idx] = vel;
                     }
@@ -496,8 +492,7 @@ impl KinematicsCommander {
             if j >= 4 {
                 return Err(KinematicsCommandError::InvalidIndex(j));
             }
-            let val = tok2
-                .parse::<f32>()
+            let val = crate::parse_f32(tok2)
                 .map_err(|_| KinematicsCommandError::InvalidValue)?;
             arr[j] = val;
             Ok(arr[j])
@@ -507,8 +502,7 @@ impl KinematicsCommander {
                     return Ok(arr[j]);
                 }
             }
-            let val = tok1
-                .parse::<f32>()
+            let val = crate::parse_f32(tok1)
                 .map_err(|_| KinematicsCommandError::InvalidValue)?;
             arr[0] = val;
             Ok(arr[0])

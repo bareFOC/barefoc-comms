@@ -19,6 +19,8 @@ pub mod io;
 pub mod kinematics;
 #[cfg(feature = "barefoc")]
 pub mod motor;
+#[cfg(feature = "barefoc")]
+pub mod servo;
 
 pub use commander::{
     CallbackEntry, CommandCallback, Commander, VerboseMode, CMD_DECIMAL, CMD_SCAN, CMD_VERBOSE,
@@ -36,3 +38,64 @@ pub use kinematics::{
 pub use kinematics::Commander4Axis;
 #[cfg(feature = "barefoc")]
 pub use motor::{MotorCommandError, MotorCommander};
+#[cfg(feature = "barefoc")]
+pub use servo::SmartServoCommander;
+
+/// Lightweight ASCII string to f32 parser avoiding core::num::dec2flt's 10 KiB lookup table.
+pub fn parse_f32(s: &str) -> Result<f32, ()> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(());
+    }
+    let (s, negative) = match s.strip_prefix('-') {
+        Some(rest) => (rest, true),
+        None => (s.strip_prefix('+').unwrap_or(s), false),
+    };
+    if s.is_empty() {
+        return Err(());
+    }
+    let mut parts = s.split('.');
+    let int_part = parts.next().unwrap();
+    let frac_part = parts.next();
+    if parts.next().is_some() {
+        return Err(());
+    }
+
+    let mut integer_val: u64 = 0;
+    if !int_part.is_empty() {
+        for &b in int_part.as_bytes() {
+            if !b.is_ascii_digit() {
+                return Err(());
+            }
+            integer_val = integer_val
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((b - b'0') as u64))
+                .ok_or(())?;
+        }
+    } else if frac_part.is_none() {
+        return Err(());
+    }
+
+    let mut frac_val: u64 = 0;
+    let mut frac_div: f64 = 1.0;
+    if let Some(frac) = frac_part {
+        if frac.is_empty() && int_part.is_empty() {
+            return Err(());
+        }
+        for &b in frac.as_bytes() {
+            if !b.is_ascii_digit() {
+                return Err(());
+            }
+            frac_val = frac_val
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((b - b'0') as u64))
+                .ok_or(())?;
+            frac_div *= 10.0;
+        }
+    }
+
+    let result = (integer_val as f64) + ((frac_val as f64) / frac_div);
+    let result_f32 = result as f32;
+    Ok(if negative { -result_f32 } else { result_f32 })
+}
+

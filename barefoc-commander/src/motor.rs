@@ -192,7 +192,7 @@ impl MotorCommander {
                         if payload.is_empty() {
                             Ok(config.current_limit)
                         } else {
-                            let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                            let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                             config.update_current_limit(val);
                             Ok(config.current_limit)
                         }
@@ -201,7 +201,7 @@ impl MotorCommander {
                         if payload.is_empty() {
                             Ok(config.voltage_limit)
                         } else {
-                            let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                            let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                             config.update_voltage_limit(val);
                             Ok(config.voltage_limit)
                         }
@@ -210,7 +210,7 @@ impl MotorCommander {
                         if payload.is_empty() {
                             Ok(config.velocity_limit)
                         } else {
-                            let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                            let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                             config.update_velocity_limit(val);
                             Ok(config.velocity_limit)
                         }
@@ -273,7 +273,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(if isset(config.phase_resistance) { config.phase_resistance } else { 0.0 })
                 } else {
-                    let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     config.phase_resistance = val;
                     Ok(config.phase_resistance)
                 }
@@ -291,7 +291,7 @@ impl MotorCommander {
                     if sub_payload.is_empty() {
                         Ok(if isset(config.axis_inductance.d) { config.axis_inductance.d } else { 0.0 })
                     } else {
-                        let val = sub_payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                        let val = crate::parse_f32(sub_payload).map_err(|_| MotorCommandError::InvalidValue)?;
                         config.axis_inductance.d = val;
                         config.phase_inductance = val;
                         Ok(config.axis_inductance.d)
@@ -301,12 +301,12 @@ impl MotorCommander {
                     if sub_payload.is_empty() {
                         Ok(if isset(config.axis_inductance.q) { config.axis_inductance.q } else { 0.0 })
                     } else {
-                        let val = sub_payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                        let val = crate::parse_f32(sub_payload).map_err(|_| MotorCommandError::InvalidValue)?;
                         config.axis_inductance.q = val;
                         Ok(config.axis_inductance.q)
                     }
                 } else {
-                    let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     config.phase_inductance = val;
                     config.axis_inductance.d = val;
                     config.axis_inductance.q = val;
@@ -320,7 +320,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(if isset(config.KV_rating) { config.KV_rating } else { 0.0 })
                 } else {
-                    let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     config.KV_rating = val;
                     Ok(config.KV_rating)
                 }
@@ -371,7 +371,7 @@ impl MotorCommander {
                         if payload.is_empty() {
                             Ok(config.sensor_offset)
                         } else {
-                            let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                            let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                             config.sensor_offset = val;
                             Ok(config.sensor_offset)
                         }
@@ -380,7 +380,7 @@ impl MotorCommander {
                         if payload.is_empty() {
                             Ok(if isset(config.zero_electric_angle) { config.zero_electric_angle } else { 0.0 })
                         } else {
-                            let val = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                            let val = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                             config.zero_electric_angle = val;
                             Ok(config.zero_electric_angle)
                         }
@@ -508,16 +508,16 @@ impl MotorCommander {
     ) -> Result<f32, MotorCommandError> {
         let mut tokens = payload.split_ascii_whitespace();
         let target_str = tokens.next().ok_or(MotorCommandError::EmptyCommand)?;
-        let target = target_str.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+        let target = crate::parse_f32(target_str).map_err(|_| MotorCommandError::InvalidValue)?;
         config.target = target;
 
         // Parse optional extra limits (velocity limit, current/voltage limit)
         if let Some(vel_str) = tokens.next() {
-            if let Ok(vel) = vel_str.parse::<f32>() {
+            if let Ok(vel) = crate::parse_f32(vel_str) {
                 config.update_velocity_limit(vel);
             }
             if let Some(torque_str) = tokens.next() {
-                if let Ok(torque) = torque_str.parse::<f32>() {
+                if let Ok(torque) = crate::parse_f32(torque_str) {
                     if config.torque_controller == TorqueControlType::voltage {
                         config.update_voltage_limit(torque);
                     } else {
@@ -539,7 +539,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(pid.p())
                 } else {
-                    let v = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let v = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     pid.set_p(v);
                     Ok(v)
                 }
@@ -548,7 +548,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(pid.i())
                 } else {
-                    let v = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let v = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     pid.set_i(v);
                     Ok(v)
                 }
@@ -557,7 +557,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(pid.d())
                 } else {
-                    let v = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let v = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     pid.set_d(v);
                     Ok(v)
                 }
@@ -566,7 +566,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(pid.output_ramp())
                 } else {
-                    let v = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let v = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     pid.set_output_ramp(v);
                     Ok(v)
                 }
@@ -575,7 +575,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(pid.limit())
                 } else {
-                    let v = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let v = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     pid.set_limit(v);
                     Ok(v)
                 }
@@ -594,7 +594,7 @@ impl MotorCommander {
                 if payload.is_empty() {
                     Ok(lpf.tf())
                 } else {
-                    let v = payload.parse::<f32>().map_err(|_| MotorCommandError::InvalidValue)?;
+                    let v = crate::parse_f32(payload).map_err(|_| MotorCommandError::InvalidValue)?;
                     lpf.set_tf(v);
                     Ok(v)
                 }

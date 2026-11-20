@@ -9,7 +9,7 @@ description = "Portable no_std descriptor-driven register-map (control table) se
 
 [dependencies]
 embedded-hal = { workspace = true }
-barefoc = { path = "../../bareFOC", default-features = false, optional = true }
+barefoc = { path = "../../bareFOC", default-features = false, features = ["boot"], optional = true }
 barefoc-drivers = { path = "../../barefoc-drivers/barefoc-drivers", default-features = false, optional = true }
 defmt = { workspace = true, optional = true }
 
@@ -19,7 +19,7 @@ embedded-hal-mock = "0.10"
 barefoc-drivers = { path = "../../barefoc-drivers/barefoc-drivers", default-features = false }
 
 [features]
-default = ["std", "simplefoc-profile"]
+default = ["std", "simplefoc-profile", "control-table"]
 # Host builds/tests. The library itself never links std.
 std = ["simplefoc-profile", "barefoc-drivers?/std"]
 defmt = ["dep:defmt"]
@@ -27,6 +27,9 @@ defmt = ["dep:defmt"]
 simplefoc-profile = ["dep:barefoc-drivers", "dep:barefoc"]
 # Kinematics register bridge: enables barefoc-drivers/kinematics feature (Actuator1Dof impl).
 kinematics = ["simplefoc-profile", "barefoc-drivers/kinematics"]
+# Universal Control Table profile mapping 0x00..0xAF with persistence and bootloader hooks.
+control-table = ["dep:barefoc"]
+
 
 [lints]
 workspace = true
