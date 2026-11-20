@@ -64,9 +64,19 @@ pub use control_table_profile::{control_table_profile, ControlTableContext};
 
 
 pub mod client;
+pub mod multi_id;
+pub mod servo_protocol;
 pub mod table;
 pub mod transport;
 
 pub use client::{ClientError, RegClientI2c, RegClientSpi};
+pub use multi_id::{MultiIdRouter, RouteTarget, DEFAULT_BROADCAST_ID};
+pub use servo_protocol::{
+    calc_dxl2_crc, parse_sync_write_setpoints, AtomicSyncSetpoint, ServoPacket,
+    ServoProtocolKind, StreamingServoParser, INST_ACTION, INST_FACTORY_RESET, INST_PING,
+    INST_READ, INST_REBOOT, INST_REG_WRITE, INST_SYNC_READ, INST_SYNC_WRITE, INST_WRITE,
+};
+#[cfg(feature = "kinematics")]
+pub use servo_protocol::apply_sync_write_to_assembly;
 pub use table::{AccessMode, Error, HookResult, RegEntry, RegMap, WriteHookFn};
 pub use transport::{RegServer, TargetTransport};

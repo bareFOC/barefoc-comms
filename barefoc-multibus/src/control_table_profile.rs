@@ -81,8 +81,8 @@ fn reboot_hook<S, B: BootloaderHandoff>(
 /// Build a MultiBus [`RegMap`] from a [`ControlTableContext`].
 pub fn control_table_profile<S: ConfigStorage, B: BootloaderHandoff>(
     ctx: ControlTableContext<S, B>,
-) -> RegMap<ControlTableContext<S, B>, 176, 64> {
-    let mut map = RegMap::new(ctx);
+) -> RegMap<ControlTableContext<S, B>, CONTROL_TABLE_SIZE, 64> {
+    let mut map: RegMap<ControlTableContext<S, B>, CONTROL_TABLE_SIZE, 64> = RegMap::new(ctx);
 
     // -----------------------------------------------------------------------
     // EEPROM Area (0x00..0x5F)
@@ -167,7 +167,7 @@ pub fn control_table_profile<S: ConfigStorage, B: BootloaderHandoff>(
 }
 
 /// Synchronize all registers from `handler().table` into the MultiBus bank.
-pub fn sync_all_to_map<S, B>(map: &mut RegMap<ControlTableContext<S, B>, 176, 64>) {
+pub fn sync_all_to_map<S, B>(map: &mut RegMap<ControlTableContext<S, B>, CONTROL_TABLE_SIZE, 64>) {
     let t = map.handler().table;
     let _ = map.set(REG_MODEL_NUMBER as u8, &t.read_u16(REG_MODEL_NUMBER).to_le_bytes());
     let _ = map.set(REG_FIRMWARE_VERSION as u8, &[t.read_u8(REG_FIRMWARE_VERSION)]);
@@ -274,23 +274,23 @@ mod tests {
         let ctx = ControlTableContext::new(table, Some(storage), Some(bootloader));
         let mut map = control_table_profile(ctx);
 
-        // Latch pointer to 0x80
-        map.write_phase(&[0x80]).unwrap();
+        // Latch pointer to REG_HARDWARE_ERROR_STATUS
+        map.write_phase(&[REG_HARDWARE_ERROR_STATUS as u8]).unwrap();
 
         // Read burst of 32 bytes
         let mut burst_buf = [0u8; 32];
         let n = map.read_phase(32, &mut burst_buf).unwrap();
         assert_eq!(n, 32);
 
-        // Hardware error status at 0x80 (offset 0 in burst)
+        // Hardware error status at offset 0 in burst
         let err_status = u16::from_le_bytes([burst_buf[0], burst_buf[1]]);
         assert_eq!(err_status, 0x0001);
 
-        // Present position at 0x84 (offset 4 in burst)
+        // Present position at offset 4 in burst
         let pos = f32::from_le_bytes([burst_buf[4], burst_buf[5], burst_buf[6], burst_buf[7]]);
         assert!((pos - 3.14159).abs() < 1e-4);
 
-        // Present bus voltage at 0x94 (offset 20 in burst)
+        // Present bus voltage at offset 20 in burst
         let vbus = f32::from_le_bytes([burst_buf[20], burst_buf[21], burst_buf[22], burst_buf[23]]);
         assert!((vbus - 5.05).abs() < 1e-4);
     }
@@ -304,15 +304,15 @@ mod tests {
 
         assert_eq!(map.handler().storage.as_ref().unwrap().save_count, 0);
 
-        // Write 0x55 to SaveConfigCommand (0x64)
-        map.write_phase(&[0x64, 0x55]).unwrap();
+        // Write 0x55 to SaveConfigCommand
+        map.write_phase(&[REG_SAVE_CONFIG_CMD as u8, 0x55]).unwrap();
 
         // Verify save_config was called
         assert_eq!(map.handler().storage.as_ref().unwrap().save_count, 1);
 
         // Register must self-clear
         let mut val = [0u8; 1];
-        let _ = map.get(0x64, &mut val).unwrap();
+        let _ = map.get(REG_SAVE_CONFIG_CMD as u8, &mut val).unwrap();
         assert_eq!(val[0], 0x00);
     }
 }

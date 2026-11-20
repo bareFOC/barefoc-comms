@@ -26,7 +26,7 @@ defmt = ["dep:defmt"]
 # SimpleFOC register bridge: pulls barefoc-drivers for RegisterId/RegisterValue/RegisterBridge.
 simplefoc-profile = ["dep:barefoc-drivers", "dep:barefoc"]
 # Kinematics register bridge: enables barefoc-drivers/kinematics feature (Actuator1Dof impl).
-kinematics = ["simplefoc-profile", "barefoc-drivers/kinematics"]
+kinematics = ["simplefoc-profile", "barefoc-drivers/kinematics", "barefoc/kinematics"]
 # Universal Control Table profile mapping 0x00..0xAF with persistence and bootloader hooks.
 control-table = ["dep:barefoc"]
 
