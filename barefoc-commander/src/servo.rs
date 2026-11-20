@@ -32,6 +32,7 @@ pub struct SmartServoCommander<'a, S = (), B = ()> {
     pub table: &'a mut ControlTable,
     pub storage: Option<&'a mut S>,
     pub bootloader: Option<&'a mut B>,
+    pub align_handler: Option<fn(&mut ControlTable, usize)>,
     board_name: [u8; MAX_NAME_LEN + 1],
     board_id: u8,
     joint_addrs: [u8; 4],
@@ -53,6 +54,7 @@ impl<'a, S, B> SmartServoCommander<'a, S, B> {
             table,
             storage,
             bootloader,
+            align_handler: None,
             board_name: [0u8; MAX_NAME_LEN + 1],
             board_id: initial_node_id,
             joint_addrs: [1, 2, 3, 4],
@@ -80,6 +82,12 @@ impl<'a, S, B> SmartServoCommander<'a, S, B> {
     pub fn with_hardware_uid<U: HardwareUid>(mut self, uid: &U) -> Self {
         self.uid_bytes = uid.uid_bytes();
         self.uid_len = uid.uid_len().min(MAX_UID_BYTES);
+        self
+    }
+
+    /// Set runtime calibration alignment handler.
+    pub fn with_align_handler(mut self, handler: fn(&mut ControlTable, usize)) -> Self {
+        self.align_handler = Some(handler);
         self
     }
 
@@ -331,6 +339,26 @@ impl<'a, S: ConfigStorage, B: BootloaderHandoff> SmartServoCommander<'a, S, B> {
             }
         }
 
+        if trimmed.eq_ignore_ascii_case("ALIGN") {
+            if let Some(handler) = self.align_handler {
+                handler(self.table, 0);
+            }
+            if let Some(ref mut storage) = self.storage {
+                let _ = storage.save_config(self.table);
+            }
+            return "ALIGN OK\n";
+        }
+
+        if trimmed.eq_ignore_ascii_case("ZERO") {
+            let pos = self.table.present_position();
+            self.table.set_homing_offset(pos);
+            self.table.set_motor_homing_offset(0, pos);
+            if let Some(ref mut storage) = self.storage {
+                let _ = storage.save_config(self.table);
+            }
+            return "ZERO OK\n";
+        }
+
         // Motor commands: M<id> C <mode> or M<id> T <val>
         if trimmed.starts_with('M') || trimmed.starts_with('m') {
             let rest = trimmed[1..].trim_start();
@@ -357,6 +385,30 @@ impl<'a, S: ConfigStorage, B: BootloaderHandoff> SmartServoCommander<'a, S, B> {
                                 }
                             }
                             return "ERROR: INVALID SETPOINT\n";
+                        } else if subcmd.eq_ignore_ascii_case("ALIGN") {
+                            let axis = _id as usize;
+                            if axis < 4 {
+                                if let Some(handler) = self.align_handler {
+                                    handler(self.table, axis);
+                                }
+                                if let Some(ref mut storage) = self.storage {
+                                    let _ = storage.save_config(self.table);
+                                }
+                                return "ALIGN OK\n";
+                            }
+                            return "ERROR: INVALID JOINT\n";
+                        } else if subcmd.eq_ignore_ascii_case("ZERO") {
+                            let axis = _id as usize;
+                            if axis < 4 {
+                                let pos = self.table.present_position();
+                                self.table.set_homing_offset(pos);
+                                self.table.set_motor_homing_offset(axis, pos);
+                                if let Some(ref mut storage) = self.storage {
+                                    let _ = storage.save_config(self.table);
+                                }
+                                return "ZERO OK\n";
+                            }
+                            return "ERROR: INVALID JOINT\n";
                         }
                     }
                 }
@@ -544,5 +596,48 @@ mod tests {
 
         let resp2 = cmd.parse_line("DIAG");
         assert_eq!(resp2, "STATUS OK\n");
+    }
+
+    fn test_align_handler(table: &mut ControlTable, axis: usize) {
+        table.set_motor_zero_electric_angle(axis, 3.14);
+        table.set_motor_sensor_direction(axis, 1);
+    }
+
+    #[test]
+    fn test_align_and_zero_commands() {
+        let mut table = ControlTable::new();
+        table.set_present_position(2.718);
+        let mut storage = MockStorage { save_count: 0 };
+        let mut boot = MockBootloader { entered: false };
+        let mut cmd = SmartServoCommander::new(&mut table, Some(&mut storage), Some(&mut boot))
+            .with_align_handler(test_align_handler);
+
+        // ALIGN top-level
+        let resp1 = cmd.parse_line("ALIGN");
+        assert_eq!(resp1, "ALIGN OK\n");
+        assert_eq!(cmd.table.motor_zero_electric_angle(0), 3.14);
+        assert_eq!(cmd.table.motor_sensor_direction(0), 1);
+        assert_eq!(cmd.storage.as_ref().unwrap().save_count, 1);
+
+        // M1 ALIGN
+        let resp2 = cmd.parse_line("M1 ALIGN");
+        assert_eq!(resp2, "ALIGN OK\n");
+        assert_eq!(cmd.table.motor_zero_electric_angle(1), 3.14);
+        assert_eq!(cmd.table.motor_sensor_direction(1), 1);
+        assert_eq!(cmd.storage.as_ref().unwrap().save_count, 2);
+
+        // ZERO top-level
+        let resp3 = cmd.parse_line("ZERO");
+        assert_eq!(resp3, "ZERO OK\n");
+        assert_eq!(cmd.table.homing_offset(), 2.718);
+        assert_eq!(cmd.table.motor_homing_offset(0), 2.718);
+        assert_eq!(cmd.storage.as_ref().unwrap().save_count, 3);
+
+        // M2 ZERO
+        cmd.table.set_present_position(0.5);
+        let resp4 = cmd.parse_line("M2 ZERO");
+        assert_eq!(resp4, "ZERO OK\n");
+        assert_eq!(cmd.table.motor_homing_offset(2), 0.5);
+        assert_eq!(cmd.storage.as_ref().unwrap().save_count, 4);
     }
 }

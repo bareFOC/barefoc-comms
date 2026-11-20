@@ -24,6 +24,8 @@ pub struct ControlTableContext<S = (), B = ()> {
     pub storage: Option<S>,
     /// Optional Katapult bootloader hand-off mechanism.
     pub bootloader: Option<B>,
+    /// Optional runtime alignment handler: receives axis index.
+    pub align_handler: Option<fn(&mut ControlTable, usize)>,
 }
 
 impl<S, B> ControlTableContext<S, B> {
@@ -33,7 +35,14 @@ impl<S, B> ControlTableContext<S, B> {
             table,
             storage,
             bootloader,
+            align_handler: None,
         }
+    }
+
+    /// Attach a runtime alignment handler.
+    pub fn with_align_handler(mut self, handler: fn(&mut ControlTable, usize)) -> Self {
+        self.align_handler = Some(handler);
+        self
     }
 }
 
@@ -76,6 +85,46 @@ fn reboot_hook<S, B: BootloaderHandoff>(
         }
     }
     HookResult::Applied
+}
+
+fn calib_hook<S: ConfigStorage, B>(
+    ctx: &mut ControlTableContext<S, B>,
+    _offset: u8,
+    bytes: &[u8],
+) -> HookResult {
+    if bytes.is_empty() {
+        return HookResult::Applied;
+    }
+    match bytes[0] {
+        CMD_CALIB_ALIGN => {
+            if let Some(handler) = ctx.align_handler {
+                handler(&mut ctx.table, 0);
+            }
+            if let Some(ref mut storage) = ctx.storage {
+                let _ = storage.save_config(&ctx.table);
+            }
+            HookResult::SelfClear
+        }
+        CMD_CALIB_SWEEP => {
+            HookResult::SelfClear
+        }
+        CMD_CALIB_SAVE => {
+            if let Some(ref mut storage) = ctx.storage {
+                let _ = storage.save_config(&ctx.table);
+            }
+            HookResult::SelfClear
+        }
+        CMD_CALIB_SET_ORIGIN => {
+            let pos = ctx.table.present_position();
+            ctx.table.set_homing_offset(pos);
+            ctx.table.set_motor_homing_offset(0, pos);
+            if let Some(ref mut storage) = ctx.storage {
+                let _ = storage.save_config(&ctx.table);
+            }
+            HookResult::SelfClear
+        }
+        _ => HookResult::Applied,
+    }
 }
 
 /// Build a MultiBus [`RegMap`] from a [`ControlTableContext`].
@@ -136,6 +185,13 @@ pub fn control_table_profile<S: ConfigStorage, B: BootloaderHandoff>(
         REG_SAVE_CONFIG_CMD as u8,
         1,
         save_hook::<S, B>,
+    ));
+
+    // Calibration command hook (0xB0)
+    let _ = map.add_register(RegEntry::rw_hooked(
+        REG_CALIB_CMD as u8,
+        1,
+        calib_hook::<S, B>,
     ));
 
     let _ = map.add_register(RegEntry::rw(REG_PROFILE_VELOCITY as u8, 4));
@@ -313,6 +369,70 @@ mod tests {
         // Register must self-clear
         let mut val = [0u8; 1];
         let _ = map.get(REG_SAVE_CONFIG_CMD as u8, &mut val).unwrap();
+        assert_eq!(val[0], 0x00);
+    }
+
+    fn dummy_align_handler(table: &mut ControlTable, _axis: usize) {
+        table.set_motor_zero_electric_angle(0, 2.0);
+        table.set_motor_sensor_direction(0, 1);
+    }
+
+    #[test]
+    fn test_calib_cmd_align() {
+        let table = ControlTable::new();
+        let storage = MockStorage { save_count: 0 };
+        let ctx = ControlTableContext::new(table, Some(storage), None::<MockBootloader>)
+            .with_align_handler(dummy_align_handler);
+        let mut map = control_table_profile(ctx);
+
+        // Write 0x01 (CMD_CALIB_ALIGN) to CALIB_CMD (0xB0)
+        map.write_phase(&[REG_CALIB_CMD as u8, CMD_CALIB_ALIGN]).unwrap();
+
+        assert_eq!(map.handler().table.motor_zero_electric_angle(0), 2.0);
+        assert_eq!(map.handler().table.motor_sensor_direction(0), 1);
+        assert_eq!(map.handler().storage.as_ref().unwrap().save_count, 1);
+
+        // Register must self-clear
+        let mut val = [0u8; 1];
+        let _ = map.get(REG_CALIB_CMD as u8, &mut val).unwrap();
+        assert_eq!(val[0], 0x00);
+    }
+
+    #[test]
+    fn test_calib_cmd_set_origin() {
+        let mut table = ControlTable::new();
+        table.set_present_position(1.5);
+        let storage = MockStorage { save_count: 0 };
+        let ctx = ControlTableContext::new(table, Some(storage), None::<MockBootloader>);
+        let mut map = control_table_profile(ctx);
+
+        // Write 0x04 (CMD_CALIB_SET_ORIGIN) to CALIB_CMD (0xB0)
+        map.write_phase(&[REG_CALIB_CMD as u8, CMD_CALIB_SET_ORIGIN]).unwrap();
+
+        assert_eq!(map.handler().table.homing_offset(), 1.5);
+        assert_eq!(map.handler().table.motor_homing_offset(0), 1.5);
+        assert_eq!(map.handler().storage.as_ref().unwrap().save_count, 1);
+
+        let mut val = [0u8; 1];
+        let _ = map.get(REG_CALIB_CMD as u8, &mut val).unwrap();
+        assert_eq!(val[0], 0x00);
+    }
+
+    #[test]
+    fn test_calib_cmd_save_and_sweep() {
+        let table = ControlTable::new();
+        let storage = MockStorage { save_count: 0 };
+        let ctx = ControlTableContext::new(table, Some(storage), None::<MockBootloader>);
+        let mut map = control_table_profile(ctx);
+
+        // Write 0x03 (CMD_CALIB_SAVE)
+        map.write_phase(&[REG_CALIB_CMD as u8, CMD_CALIB_SAVE]).unwrap();
+        assert_eq!(map.handler().storage.as_ref().unwrap().save_count, 1);
+
+        // Write 0x02 (CMD_CALIB_SWEEP)
+        map.write_phase(&[REG_CALIB_CMD as u8, CMD_CALIB_SWEEP]).unwrap();
+        let mut val = [0u8; 1];
+        let _ = map.get(REG_CALIB_CMD as u8, &mut val).unwrap();
         assert_eq!(val[0], 0x00);
     }
 }

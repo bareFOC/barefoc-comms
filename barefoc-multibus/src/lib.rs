@@ -61,6 +61,10 @@ pub use profile::{
 pub mod control_table_profile;
 #[cfg(feature = "control-table")]
 pub use control_table_profile::{control_table_profile, ControlTableContext};
+#[cfg(feature = "control-table")]
+pub mod control_table_bridge {
+    pub use crate::control_table_profile::*;
+}
 
 
 pub mod client;
