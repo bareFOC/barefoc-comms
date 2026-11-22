@@ -38,7 +38,7 @@ pub fn simplefoc_profile<B: RegisterBridge>(
 ) -> RegMap<B, 384, 128> {
     let mut map = RegMap::new(bridge);
     for id in RegisterId::ALL {
-        if id == RegisterId::Position {
+        if id == RegisterId::Position || (id as u8) == 0x64 {
             continue;
         }
         let offset = id as u8;
@@ -169,7 +169,7 @@ pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
 ) -> RegMap<MultiMotorState<N, B>, 384, 128> {
     let mut map = RegMap::new(MultiMotorState::new(motors));
     for id in RegisterId::ALL {
-        if id == RegisterId::Position {
+        if id == RegisterId::Position || (id as u8) == 0x64 {
             continue;
         }
         let offset = id as u8;
