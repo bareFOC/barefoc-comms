@@ -14,6 +14,12 @@ use crate::table::{HookResult, RegEntry, RegMap};
 /// Universal register offset for the multi-motor selector (0x70).
 pub const REG_MOTOR_SELECT: u8 = 0x70;
 
+/// Universal register offset for SaveConfig command trigger (0x64).
+pub const REG_SAVE_CONFIG: u8 = 0x64;
+
+/// Universal register offset for TopologyMode selection (0x78).
+pub const REG_TOPOLOGY_MODE: u8 = 0x78;
+
 /// Generic write hook for a SimpleFOC register. Deserializes the bank bytes into a
 /// [`RegisterValue`], calls [`RegisterBridge::write_reg`], and returns
 /// [`HookResult::Applied`]. On any deserialization or bridge error the write is
@@ -32,23 +38,39 @@ fn sf_hook<B: RegisterBridge>(ctx: &mut B, offset: u8, bytes: &[u8]) -> HookResu
     HookResult::Applied
 }
 
+/// Generic write hook for `REG_SAVE_CONFIG` (0x64).
+pub fn save_config_hook<B: RegisterBridge>(
+    _ctx: &mut B,
+    _offset: u8,
+    _bytes: &[u8],
+) -> HookResult {
+    HookResult::Applied
+}
+
 /// Auto-generate a [`RegMap`] from a [`RegisterBridge`] implementation.
 pub fn simplefoc_profile<B: RegisterBridge>(
     bridge: B,
 ) -> RegMap<B, 384, 128> {
     let mut map = RegMap::new(bridge);
     for id in RegisterId::ALL {
-        if id == RegisterId::Position || (id as u8) == 0x64 {
+        if id == RegisterId::Position {
             continue;
         }
         let offset = id as u8;
         let width = id.expected_size() as u8;
-        if id.is_read_only() {
+        if offset == REG_SAVE_CONFIG {
+            let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
+            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
+        } else if id.is_read_only() {
             let _ = map.add_register(RegEntry::ro(offset, width));
         } else {
             let hook: crate::table::WriteHookFn<B> = sf_hook::<B>;
             let _ = map.add_register(RegEntry::rw_hooked(offset, width, hook));
         }
+    }
+    if map.get(REG_SAVE_CONFIG, &mut [0u8; 1]).is_err() {
+        let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
+        let _ = map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook));
     }
     map
 }
@@ -159,23 +181,65 @@ fn multi_global_sf_hook<const N: usize, B: RegisterBridge>(
     HookResult::Applied
 }
 
+/// Write hook for `REG_SAVE_CONFIG` (0x64) in multi-motor profiles.
+pub fn multi_motor_save_config_hook<const N: usize, B: RegisterBridge>(
+    _ctx: &mut MultiMotorState<N, B>,
+    _offset: u8,
+    _bytes: &[u8],
+) -> HookResult {
+    HookResult::Applied
+}
+
+/// Write hook for `REG_TOPOLOGY_MODE` (0x78) in multi-motor profiles.
+pub fn topology_mode_hook<const N: usize, B: RegisterBridge>(
+    _ctx: &mut MultiMotorState<N, B>,
+    _offset: u8,
+    _bytes: &[u8],
+) -> HookResult {
+    HookResult::Applied
+}
+
+/// Register a custom save configuration hook on register `0x64`.
+pub fn register_save_config_hook<CTX, const CAP: usize, const MAX: usize>(
+    map: &mut RegMap<CTX, CAP, MAX>,
+    hook: crate::table::WriteHookFn<CTX>,
+) -> Result<(), crate::table::Error> {
+    map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook))
+}
+
+/// Register a custom topology mode hook on register `0x78`.
+pub fn register_topology_mode_hook<CTX, const CAP: usize, const MAX: usize>(
+    map: &mut RegMap<CTX, CAP, MAX>,
+    hook: crate::table::WriteHookFn<CTX>,
+) -> Result<(), crate::table::Error> {
+    map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, hook))
+}
+
 /// Auto-generate a [`RegMap`] for an N-motor system from an array of [`RegisterBridge`] instances.
 ///
 /// Registers the motor window (`0x00..=0x6C`) routing to the currently selected motor,
 /// `MotorSelect` (`0x70`) gating selector updates with bounds checking,
+/// `SaveConfig` (`0x64`) for non-volatile persistence triggers,
+/// `TopologyMode` (`0x78`) for dynamic kinematic topology reconfiguration,
 /// and board/kinematics descriptors (`0x71..=0xBF`) routing to global state.
 pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
     motors: [B; N],
 ) -> RegMap<MultiMotorState<N, B>, 384, 128> {
     let mut map = RegMap::new(MultiMotorState::new(motors));
     for id in RegisterId::ALL {
-        if id == RegisterId::Position || (id as u8) == 0x64 {
+        if id == RegisterId::Position {
             continue;
         }
         let offset = id as u8;
         let width = id.expected_size() as u8;
         if offset == REG_MOTOR_SELECT {
             let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = motor_select_hook::<N, B>;
+            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
+        } else if offset == REG_SAVE_CONFIG {
+            let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_motor_save_config_hook::<N, B>;
+            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
+        } else if offset == REG_TOPOLOGY_MODE {
+            let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
             let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
         } else if offset <= 0x6C {
             if id.is_read_only() {
@@ -193,10 +257,20 @@ pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
             }
         }
     }
-    // Ensure REG_MOTOR_SELECT (0x70) is registered if not already present in ALL
+    // Ensure REG_MOTOR_SELECT (0x70) is registered
     if map.get(REG_MOTOR_SELECT, &mut [0u8; 1]).is_err() {
         let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = motor_select_hook::<N, B>;
         let _ = map.add_register(RegEntry::rw_hooked(REG_MOTOR_SELECT, 1, hook));
+    }
+    // Ensure REG_SAVE_CONFIG (0x64) is registered
+    if map.get(REG_SAVE_CONFIG, &mut [0u8; 1]).is_err() {
+        let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_motor_save_config_hook::<N, B>;
+        let _ = map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook));
+    }
+    // Ensure REG_TOPOLOGY_MODE (0x78) is registered
+    if map.get(REG_TOPOLOGY_MODE, &mut [0u8; 1]).is_err() {
+        let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
+        let _ = map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, hook));
     }
     map
 }
@@ -563,5 +637,30 @@ mod tests {
             assert_eq!(f32::from_le_bytes(buf), 7.89);
         }
         mock_bus.done();
+    }
+
+    #[test]
+    fn test_save_config_and_topology_mode_registers() {
+        let clock = NullClock;
+        let motor0 = MotorConfig::new(&clock);
+        let motor1 = MotorConfig::new(&clock);
+        let mut server = RegServer::new(multi_motor_profile([motor0, motor1]));
+
+        let mut bus = FakeI2cBus {
+            server: &mut server,
+        };
+        let mut client = RegClientI2c::<_, 8>::new(&mut bus);
+
+        // Write 0x55 (Save Config command) to 0x64
+        client.write_register(DEV, REG_SAVE_CONFIG, &[0x55]).unwrap();
+        let mut save_val = [0u8; 1];
+        client.read_register(DEV, REG_SAVE_CONFIG, 1, &mut save_val).unwrap();
+        assert_eq!(save_val[0], 0x55);
+
+        // Write 0x02 (Topology Mode) to 0x78
+        client.write_register(DEV, REG_TOPOLOGY_MODE, &[0x02]).unwrap();
+        let mut topo_val = [0u8; 1];
+        client.read_register(DEV, REG_TOPOLOGY_MODE, 1, &mut topo_val).unwrap();
+        assert_eq!(topo_val[0], 0x02);
     }
 }
