@@ -12,21 +12,21 @@ use barefoc_drivers::comms::RegisterBridge;
 use crate::table::{HookResult, RegEntry, RegMap};
 
 /// Universal register offset for the multi-motor selector (0x70).
-pub const REG_MOTOR_SELECT: u8 = 0x70;
+pub const REG_MOTOR_SELECT: u16 = 0x70;
 
 /// Universal register offset for SaveConfig command trigger (0x64).
-pub const REG_SAVE_CONFIG: u8 = 0x64;
+pub const REG_SAVE_CONFIG: u16 = 0x64;
 
 /// Universal register offset for TopologyMode selection (0x78).
-pub const REG_TOPOLOGY_MODE: u8 = 0x78;
+pub const REG_TOPOLOGY_MODE: u16 = 0x78;
 
 /// Generic write hook for a SimpleFOC register. Deserializes the bank bytes into a
 /// [`RegisterValue`], calls [`RegisterBridge::write_reg`], and returns
 /// [`HookResult::Applied`]. On any deserialization or bridge error the write is
 /// silently skipped (the bank still holds the bytes so read-back returns what the
 /// host sent).
-fn sf_hook<B: RegisterBridge>(ctx: &mut B, offset: u8, bytes: &[u8]) -> HookResult {
-    let id = match RegisterId::try_from(offset) {
+fn sf_hook<B: RegisterBridge>(ctx: &mut B, offset: u16, bytes: &[u8]) -> HookResult {
+    let id = match RegisterId::try_from(offset as u8) {
         Ok(id) => id,
         Err(_) => return HookResult::Applied,
     };
@@ -41,7 +41,7 @@ fn sf_hook<B: RegisterBridge>(ctx: &mut B, offset: u8, bytes: &[u8]) -> HookResu
 /// Generic write hook for `REG_SAVE_CONFIG` (0x64).
 pub fn save_config_hook<B: RegisterBridge>(
     _ctx: &mut B,
-    _offset: u8,
+    _offset: u16,
     _bytes: &[u8],
 ) -> HookResult {
     HookResult::Applied
@@ -56,7 +56,7 @@ pub fn simplefoc_profile<B: RegisterBridge>(
         if id == RegisterId::Position {
             continue;
         }
-        let offset = id as u8;
+        let offset = id as u16;
         let width = id.expected_size() as u8;
         if offset == REG_SAVE_CONFIG {
             let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
@@ -125,10 +125,10 @@ impl<const N: usize, B: RegisterBridge> MultiMotorState<N, B> {
 /// Dispatches `write_reg` to `ctx.motors[ctx.selected]`.
 fn multi_motor_sf_hook<const N: usize, B: RegisterBridge>(
     ctx: &mut MultiMotorState<N, B>,
-    offset: u8,
+    offset: u16,
     bytes: &[u8],
 ) -> HookResult {
-    let id = match RegisterId::try_from(offset) {
+    let id = match RegisterId::try_from(offset as u8) {
         Ok(id) => id,
         Err(_) => return HookResult::Applied,
     };
@@ -147,7 +147,7 @@ fn multi_motor_sf_hook<const N: usize, B: RegisterBridge>(
 /// Updates `ctx.selected` if index < N; otherwise self-clears to 0.
 fn motor_select_hook<const N: usize, B: RegisterBridge>(
     ctx: &mut MultiMotorState<N, B>,
-    _offset: u8,
+    _offset: u16,
     bytes: &[u8],
 ) -> HookResult {
     if bytes.is_empty() {
@@ -164,10 +164,10 @@ fn motor_select_hook<const N: usize, B: RegisterBridge>(
 /// Dispatches `write_reg` to global state (`ctx.motors[0]`).
 fn multi_global_sf_hook<const N: usize, B: RegisterBridge>(
     ctx: &mut MultiMotorState<N, B>,
-    offset: u8,
+    offset: u16,
     bytes: &[u8],
 ) -> HookResult {
-    let id = match RegisterId::try_from(offset) {
+    let id = match RegisterId::try_from(offset as u8) {
         Ok(id) => id,
         Err(_) => return HookResult::Applied,
     };
@@ -184,7 +184,7 @@ fn multi_global_sf_hook<const N: usize, B: RegisterBridge>(
 /// Write hook for `REG_SAVE_CONFIG` (0x64) in multi-motor profiles.
 pub fn multi_motor_save_config_hook<const N: usize, B: RegisterBridge>(
     _ctx: &mut MultiMotorState<N, B>,
-    _offset: u8,
+    _offset: u16,
     _bytes: &[u8],
 ) -> HookResult {
     HookResult::Applied
@@ -193,7 +193,7 @@ pub fn multi_motor_save_config_hook<const N: usize, B: RegisterBridge>(
 /// Write hook for `REG_TOPOLOGY_MODE` (0x78) in multi-motor profiles.
 pub fn topology_mode_hook<const N: usize, B: RegisterBridge>(
     _ctx: &mut MultiMotorState<N, B>,
-    _offset: u8,
+    _offset: u16,
     _bytes: &[u8],
 ) -> HookResult {
     HookResult::Applied
@@ -230,7 +230,7 @@ pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
         if id == RegisterId::Position {
             continue;
         }
-        let offset = id as u8;
+        let offset = id as u16;
         let width = id.expected_size() as u8;
         if offset == REG_MOTOR_SELECT {
             let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = motor_select_hook::<N, B>;
@@ -281,7 +281,7 @@ pub fn refresh_telemetry<B: RegisterBridge, const CAP: usize, const MAX: usize>(
 ) {
     for id in RegisterId::ALL {
         if id.is_read_only() {
-            let offset = id as u8;
+            let offset = id as u16;
             let width = id.expected_size();
             if let Ok(val) = map.handler().read_reg(id) {
                 let mut buf = [0u8; 12];
@@ -305,7 +305,7 @@ pub fn refresh_telemetry_multi<const N: usize, B: RegisterBridge, const CAP: usi
         return;
     }
     for id in RegisterId::ALL {
-        let offset = id as u8;
+        let offset = id as u16;
         if id.is_read_only() && offset != REG_MOTOR_SELECT {
             let width = id.expected_size();
             let res = if offset <= 0x6C {
@@ -398,7 +398,8 @@ mod tests {
         let clock = NullClock;
         let config = MotorConfig::new(&clock);
         let mut map = simplefoc_profile(config);
-        let res = map.write_phase(&[0x00, 0x01]);
+        // Pointer 0x0000 with a one-byte payload at a read-only register.
+        let res = map.write_phase(&[0x00, 0x00, 0x01]);
         assert!(res.is_err());
     }
 
@@ -410,12 +411,12 @@ mod tests {
 
         let val: f32 = 12.5;
         let bytes = val.to_le_bytes();
-        let mut phase = [0u8; 5];
-        phase[0] = 0x50; // VoltageLimit
-        phase[1..].copy_from_slice(&bytes);
+        let mut phase = [0u8; 6];
+        phase[0] = 0x00; phase[1] = 0x50; // VoltageLimit
+        phase[2..].copy_from_slice(&bytes);
         map.write_phase(&phase).unwrap();
 
-        map.write_phase(&[0x50]).unwrap();
+        map.write_phase(&[0x00, 0x50]).unwrap();
         let mut out = [0u8; 4];
         let n = map.read_phase(4, &mut out).unwrap();
         assert_eq!(n, 4);
@@ -449,30 +450,30 @@ mod tests {
 
         // Default selected is 0: write target and gain to motor 0
         let target0 = 5.0f32;
-        let mut phase = [0u8; 5];
-        phase[0] = 0x01; // Target
-        phase[1..].copy_from_slice(&target0.to_le_bytes());
+        let mut phase = [0u8; 6];
+        phase[0] = 0x00; phase[1] = 0x01; // Target
+        phase[2..].copy_from_slice(&target0.to_le_bytes());
         map.write_phase(&phase).unwrap();
 
         let gain0 = 1.25f32;
-        let mut phase_gain = [0u8; 5];
-        phase_gain[0] = 0x30; // VelPidP
-        phase_gain[1..].copy_from_slice(&gain0.to_le_bytes());
+        let mut phase_gain = [0u8; 6];
+        phase_gain[0] = 0x00; phase_gain[1] = 0x30; // VelPidP
+        phase_gain[2..].copy_from_slice(&gain0.to_le_bytes());
         map.write_phase(&phase_gain).unwrap();
 
         // Select motor 1: write 1 to MotorSelect (0x70)
-        map.write_phase(&[0x70, 0x01]).unwrap();
+        map.write_phase(&[0x00, 0x70, 0x01]).unwrap();
         assert_eq!(map.handler().selected(), 1);
 
         // Write target and gain to motor 1
         let target1 = 10.0f32;
-        phase[0] = 0x01;
-        phase[1..].copy_from_slice(&target1.to_le_bytes());
+        phase[0] = 0x00; phase[1] = 0x01;
+        phase[2..].copy_from_slice(&target1.to_le_bytes());
         map.write_phase(&phase).unwrap();
 
         let gain1 = 3.5f32;
-        phase_gain[0] = 0x30;
-        phase_gain[1..].copy_from_slice(&gain1.to_le_bytes());
+        phase_gain[0] = 0x00; phase_gain[1] = 0x30;
+        phase_gain[2..].copy_from_slice(&gain1.to_le_bytes());
         map.write_phase(&phase_gain).unwrap();
 
         // Verify motor 0 has target0 and gain0; motor 1 has target1 and gain1
@@ -490,11 +491,11 @@ mod tests {
         let mut map = multi_motor_profile([config0, config1]);
 
         // Select motor 1 (valid)
-        map.write_phase(&[0x70, 0x01]).unwrap();
+        map.write_phase(&[0x00, 0x70, 0x01]).unwrap();
         assert_eq!(map.handler().selected(), 1);
 
         // Write out-of-range selector (2 for N=2)
-        map.write_phase(&[0x70, 0x02]).unwrap();
+        map.write_phase(&[0x00, 0x70, 0x02]).unwrap();
         // State remains 1 (no state change to selected)
         assert_eq!(map.handler().selected(), 1);
 
@@ -519,25 +520,25 @@ mod tests {
         // Default selected is 0
         refresh_telemetry_multi(&mut map);
 
-        map.write_phase(&[0x09]).unwrap();
+        map.write_phase(&[0x00, 0x09]).unwrap();
         let mut angle_bytes = [0u8; 4];
         map.read_phase(4, &mut angle_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(angle_bytes), 1.5);
 
-        map.write_phase(&[0x11]).unwrap();
+        map.write_phase(&[0x00, 0x11]).unwrap();
         let mut vel_bytes = [0u8; 4];
         map.read_phase(4, &mut vel_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(vel_bytes), 2.5);
 
         // Switch to motor 1
-        map.write_phase(&[0x70, 0x01]).unwrap();
+        map.write_phase(&[0x00, 0x70, 0x01]).unwrap();
         refresh_telemetry_multi(&mut map);
 
-        map.write_phase(&[0x09]).unwrap();
+        map.write_phase(&[0x00, 0x09]).unwrap();
         map.read_phase(4, &mut angle_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(angle_bytes), 3.5);
 
-        map.write_phase(&[0x11]).unwrap();
+        map.write_phase(&[0x00, 0x11]).unwrap();
         map.read_phase(4, &mut vel_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(vel_bytes), 4.5);
     }
@@ -610,15 +611,15 @@ mod tests {
 
         let expectations = [
             // Select motor 0
-            I2cTx::write(DEV, vec![0x70, 0]),
+            I2cTx::write(DEV, vec![0x00, 0x70, 0]),
             // Pointer latch Angle (0x09)
-            I2cTx::write(DEV, vec![0x09]),
+            I2cTx::write(DEV, vec![0x00, 0x09]),
             // Read 4 bytes angle0
             I2cTx::read(DEV, angle0.to_vec()),
             // Select motor 1
-            I2cTx::write(DEV, vec![0x70, 1]),
+            I2cTx::write(DEV, vec![0x00, 0x70, 1]),
             // Pointer latch Angle (0x09)
-            I2cTx::write(DEV, vec![0x09]),
+            I2cTx::write(DEV, vec![0x00, 0x09]),
             // Read 4 bytes angle1
             I2cTx::read(DEV, angle1.to_vec()),
         ];

@@ -17,6 +17,19 @@
 //! - `DIAG` or `D`: Print active hardware error bitfield and status
 //! - `P <val>`: Set position loop proportional gain Kp
 //! - `V <val>`: Set velocity loop proportional gain Kp
+//! - `TM`: Query MOSFET stage temperature (legacy whole-degree channel)
+//! - `TU`: Query MCU silicon temperature
+//! - `TW`: Query motor winding temperature
+//! - `LT <zone> <deg>`: Set a thermal limit (`F`/`TM` MOSFET, `U`/`TU` MCU,
+//!   `M`/`W`/`TW` motor winding)
+//! - `CUR` / `PWR` / `NRG`: Query bus current (A), bus power (W) and energy (W·h)
+//! - `TRQ` / `ACC` / `MAG`: Query torque (N·m), acceleration (rad/s²) and field (mT)
+//! - `WDT` / `CPU`: Query watchdog countdown (ms) and RTOS CPU load (%)
+//! - `ODOM`: Query lifetime operating hours
+//! - `CAP` / `ERRX`: Query capability bitmask and extended error flags as 8-digit hex
+//!
+//! All new queries preserve the legacy `TM`/`TU`/`TW`/`LT` grammar. Unequipped
+//! floating-point channels report `NAN`.
 
 use barefoc::control_table::{
     ControlTable, OperatingMode, TopologyPreset, REG_NODE_ID, REG_POS_P_GAIN, REG_VEL_P_GAIN,
@@ -205,6 +218,88 @@ impl<'a, S, B> SmartServoCommander<'a, S, B> {
         self.response_buf[len] = b'\n';
         core::str::from_utf8(&self.response_buf[..len + 1]).unwrap_or("")
     }
+
+    /// Format a whole-degree temperature (legacy u16 channel) with a newline.
+    fn format_u16_response(&mut self, val: u16) -> &str {
+        let mut tmp = [0u8; 5];
+        let mut i = 0;
+        let mut v = val;
+        if v == 0 {
+            tmp[0] = b'0';
+            i = 1;
+        } else {
+            while v > 0 {
+                tmp[i] = b'0' + (v % 10) as u8;
+                v /= 10;
+                i += 1;
+            }
+        }
+        let mut at = 0;
+        while i > 0 {
+            i -= 1;
+            self.response_buf[at] = tmp[i];
+            at += 1;
+        }
+        self.response_buf[at] = b'\n';
+        core::str::from_utf8(&self.response_buf[..at + 1]).unwrap_or("")
+    }
+
+    /// Format a `u32` bitmask as eight uppercase hexadecimal digits plus newline.
+    fn format_u32_hex_response(&mut self, val: u32) -> &str {
+        const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
+        for i in 0..8 {
+            let shift = 28 - i * 4;
+            self.response_buf[i] = HEX_CHARS[((val >> shift) & 0xF) as usize];
+        }
+        self.response_buf[8] = b'\n';
+        core::str::from_utf8(&self.response_buf[..9]).unwrap_or("")
+    }
+
+    /// Format a temperature sample as a fixed two-decimal ASCII value.
+    ///
+    /// `f32::NAN` (unequipped zone) is reported as `NAN`. Uses `libm` for
+    /// absolute value / rounding so the formatter stays `#![no_std]`.
+    fn format_temp_response(&mut self, temp: f32) -> &str {
+        if temp.is_nan() {
+            self.response_buf[..4].copy_from_slice(b"NAN\n");
+            return core::str::from_utf8(&self.response_buf[..4]).unwrap_or("NAN\n");
+        }
+        let negative = temp < 0.0;
+        let scaled = libm::roundf(libm::fabsf(temp) * 100.0) as u32;
+        let whole = scaled / 100;
+        let frac = scaled % 100;
+        let mut i = 0;
+        if negative {
+            self.response_buf[i] = b'-';
+            i += 1;
+        }
+        let mut digits = [0u8; 10];
+        let mut n = 0;
+        let mut w = whole;
+        if w == 0 {
+            digits[0] = b'0';
+            n = 1;
+        } else {
+            while w > 0 {
+                digits[n] = b'0' + (w % 10) as u8;
+                w /= 10;
+                n += 1;
+            }
+        }
+        while n > 0 {
+            n -= 1;
+            self.response_buf[i] = digits[n];
+            i += 1;
+        }
+        self.response_buf[i] = b'.';
+        i += 1;
+        self.response_buf[i] = b'0' + (frac / 10) as u8;
+        i += 1;
+        self.response_buf[i] = b'0' + (frac % 10) as u8;
+        i += 1;
+        self.response_buf[i] = b'\n';
+        core::str::from_utf8(&self.response_buf[..i + 1]).unwrap_or("")
+    }
 }
 
 impl<'a, S: ConfigStorage, B: BootloaderHandoff> SmartServoCommander<'a, S, B> {
@@ -337,6 +432,90 @@ impl<'a, S: ConfigStorage, B: BootloaderHandoff> SmartServoCommander<'a, S, B> {
             } else {
                 return "HARDWARE ERROR DETECTED\n";
             }
+        }
+
+        // Multi-zone thermal queries:
+        //   TM -> MOSFET stage (legacy whole-degree channel at 0x142)
+        //   TU -> MCU silicon (0x16A)
+        //   TW -> motor windings (0x16E)
+        // Unequipped zones report NAN.
+        if trimmed.eq_ignore_ascii_case("TM") {
+            let value = self.table.present_temp_mosfet() as u16;
+            return self.format_u16_response(value);
+        }
+        if trimmed.eq_ignore_ascii_case("TU") {
+            return self.format_temp_response(self.table.present_temp_mcu());
+        }
+        if trimmed.eq_ignore_ascii_case("TW") {
+            return self.format_temp_response(self.table.present_temp_motor());
+        }
+
+        // Thermal limit configuration: LT <zone> <deg>.
+        // Zone codes follow the query mnemonics; `F` is accepted as an alias
+        // for the MOSFET/FET stage and `W` for the motor winding. The single
+        // letter `M` maps to the motor zone (per the Commander spec scenario
+        // `LT M 90` -> REG_TEMP_LIMIT_MOTOR).
+        if trimmed.len() >= 2 && trimmed[..2].eq_ignore_ascii_case("LT") {
+            let rest = trimmed[2..].trim_start();
+            let mut parts = rest.split_whitespace();
+            if let (Some(zone), Some(value_str)) = (parts.next(), parts.next()) {
+                let limit = match crate::parse_f32(value_str) {
+                    Ok(v) if v > 0.0 && v <= 200.0 => v,
+                    _ => return "ERROR: INVALID LIMIT\n",
+                };
+                if zone.eq_ignore_ascii_case("F") || zone.eq_ignore_ascii_case("TM") {
+                    self.table.set_temp_limit_mosfet(limit);
+                } else if zone.eq_ignore_ascii_case("U") || zone.eq_ignore_ascii_case("TU") {
+                    self.table.set_temp_limit_mcu(limit);
+                } else if zone.eq_ignore_ascii_case("M")
+                    || zone.eq_ignore_ascii_case("W")
+                    || zone.eq_ignore_ascii_case("TW")
+                {
+                    self.table.set_temp_limit_motor(limit);
+                } else {
+                    return "ERROR: INVALID ZONE\n";
+                }
+                return "LIMIT SET\n";
+            }
+            return "ERROR: INVALID LT COMMAND\n";
+        }
+
+        // Extended telemetry queries (`extended-telemetry-controls`).
+        // These are checked before the single-letter motor/P/V/G commands so
+        // mnemonics such as `MAG` and `PWR` are not swallowed by that grammar.
+        if trimmed.eq_ignore_ascii_case("CUR") {
+            return self.format_temp_response(self.table.present_bus_current());
+        }
+        if trimmed.eq_ignore_ascii_case("PWR") {
+            return self.format_temp_response(self.table.present_bus_power());
+        }
+        if trimmed.eq_ignore_ascii_case("NRG") {
+            return self.format_temp_response(self.table.accumulated_energy());
+        }
+        if trimmed.eq_ignore_ascii_case("TRQ") {
+            return self.format_temp_response(self.table.present_torque());
+        }
+        if trimmed.eq_ignore_ascii_case("ACC") {
+            return self.format_temp_response(self.table.present_acceleration());
+        }
+        if trimmed.eq_ignore_ascii_case("MAG") {
+            return self.format_temp_response(self.table.mag_field_magnitude());
+        }
+        if trimmed.eq_ignore_ascii_case("ODOM") {
+            return self.format_temp_response(self.table.total_operating_hours());
+        }
+        if trimmed.eq_ignore_ascii_case("WDT") {
+            let remaining = self.table.watchdog_time_left_ms();
+            return self.format_u16_response(remaining);
+        }
+        if trimmed.eq_ignore_ascii_case("CPU") {
+            return self.format_u8_response(self.table.cpu_load_pct());
+        }
+        if trimmed.eq_ignore_ascii_case("CAP") {
+            return self.format_u32_hex_response(self.table.hardware_capabilities());
+        }
+        if trimmed.eq_ignore_ascii_case("ERRX") {
+            return self.format_u32_hex_response(self.table.hardware_error_status_ext());
         }
 
         if trimmed.eq_ignore_ascii_case("ALIGN") {
@@ -639,5 +818,124 @@ mod tests {
         assert_eq!(resp4, "ZERO OK\n");
         assert_eq!(cmd.table.motor_homing_offset(2), 0.5);
         assert_eq!(cmd.storage.as_ref().unwrap().save_count, 4);
+    }
+
+    #[test]
+    fn test_thermal_query_commands() {
+        let mut table = ControlTable::new();
+        table.set_present_temp_mosfet(55.9);
+        table.set_present_temp_mcu(61.25);
+        table.set_present_temp_motor(72.5);
+        let mut storage = MockStorage { save_count: 0 };
+        let mut boot = MockBootloader { entered: false };
+        let mut cmd = SmartServoCommander::new(&mut table, Some(&mut storage), Some(&mut boot));
+
+        // TM reports the legacy whole-degree channel without decimals.
+        assert_eq!(cmd.parse_line("TM"), "55\n");
+        assert_eq!(cmd.parse_line("tu"), "61.25\n");
+        assert_eq!(cmd.parse_line("TW"), "72.50\n");
+
+        // Unequipped zones report NAN.
+        cmd.table.set_present_temp_motor(f32::NAN);
+        assert_eq!(cmd.parse_line("TW"), "NAN\n");
+    }
+
+    #[test]
+    fn test_thermal_limit_command_and_validation() {
+        let mut table = ControlTable::new();
+        let mut storage = MockStorage { save_count: 0 };
+        let mut boot = MockBootloader { entered: false };
+        let mut cmd = SmartServoCommander::new(&mut table, Some(&mut storage), Some(&mut boot));
+
+        // Spec scenario: LT M 90 targets the motor-winding limit.
+        assert_eq!(cmd.parse_line("LT M 90"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_motor(), 90.0);
+        assert_eq!(cmd.table.temp_limit_mosfet(), 75.0);
+
+        // All zone codes, including the TM/TU/TW mnemonics and lowercase input.
+        assert_eq!(cmd.parse_line("LT F 80.5"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_mosfet(), 80.5);
+        assert_eq!(cmd.parse_line("LT TM 81"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_mosfet(), 81.0);
+        assert_eq!(cmd.parse_line("LT U 85.25"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_mcu(), 85.25);
+        assert_eq!(cmd.parse_line("LT tu 86"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_mcu(), 86.0);
+        assert_eq!(cmd.parse_line("LT W 91"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_motor(), 91.0);
+        assert_eq!(cmd.parse_line("LT TW 92"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_motor(), 92.0);
+
+        // Validation: unknown zone, non-numeric, zero, negative and out-of-range.
+        assert_eq!(cmd.parse_line("LT X 90"), "ERROR: INVALID ZONE\n");
+        assert_eq!(cmd.parse_line("LT M abc"), "ERROR: INVALID LIMIT\n");
+        assert_eq!(cmd.parse_line("LT M 0"), "ERROR: INVALID LIMIT\n");
+        assert_eq!(cmd.parse_line("LT M -5"), "ERROR: INVALID LIMIT\n");
+        assert_eq!(cmd.parse_line("LT M 250"), "ERROR: INVALID LIMIT\n");
+        assert_eq!(cmd.parse_line("LT M"), "ERROR: INVALID LT COMMAND\n");
+        assert_eq!(cmd.parse_line("LT"), "ERROR: INVALID LT COMMAND\n");
+        assert_eq!(cmd.table.temp_limit_motor(), 92.0);
+    }
+
+    #[test]
+    fn test_extended_telemetry_query_commands() {
+        let mut table = ControlTable::new();
+        table.set_present_bus_current(1.25);
+        table.set_present_bus_power(7.5);
+        table.set_accumulated_energy(3.5);
+        table.set_present_torque(0.4);
+        table.set_present_acceleration(12.5);
+        table.set_mag_field_magnitude(42.5);
+        table.set_total_operating_hours(125.75);
+        table.set_watchdog_timeout_ms(500);
+        table.feed_watchdog();
+        table.set_cpu_load_pct(37);
+        table.set_hardware_capabilities(
+            barefoc::control_table::capabilities::DUAL_ENCODER
+                | barefoc::control_table::capabilities::POWER_TELEMETRY,
+        );
+        table.set_error_flag_ext(barefoc::control_table::error_flags_ext::STALL_DETECTED);
+
+        let mut storage = MockStorage { save_count: 0 };
+        let mut boot = MockBootloader { entered: false };
+        let mut cmd = SmartServoCommander::new(&mut table, Some(&mut storage), Some(&mut boot));
+
+        assert_eq!(cmd.parse_line("CUR"), "1.25\n");
+        assert_eq!(cmd.parse_line("PWR"), "7.50\n");
+        assert_eq!(cmd.parse_line("NRG"), "3.50\n");
+        assert_eq!(cmd.parse_line("TRQ"), "0.40\n");
+        assert_eq!(cmd.parse_line("ACC"), "12.50\n");
+        assert_eq!(cmd.parse_line("MAG"), "42.50\n");
+        assert_eq!(cmd.parse_line("ODOM"), "125.75\n");
+        assert_eq!(cmd.parse_line("WDT"), "500\n");
+        assert_eq!(cmd.parse_line("CPU"), "37\n");
+        assert_eq!(cmd.parse_line("cap"), "00000022\n");
+        assert_eq!(cmd.parse_line("ERRX"), "00010000\n");
+    }
+
+    #[test]
+    fn test_extended_queries_do_not_break_legacy_commands() {
+        let mut table = ControlTable::new();
+        table.set_present_temp_mosfet(55.0);
+        table.set_present_temp_mcu(61.25);
+        table.set_present_temp_motor(72.5);
+        let mut storage = MockStorage { save_count: 0 };
+        let mut boot = MockBootloader { entered: false };
+        let mut cmd = SmartServoCommander::new(&mut table, Some(&mut storage), Some(&mut boot));
+
+        // Legacy thermal queries are unchanged.
+        assert_eq!(cmd.parse_line("TM"), "55\n");
+        assert_eq!(cmd.parse_line("TU"), "61.25\n");
+        assert_eq!(cmd.parse_line("TW"), "72.50\n");
+        assert_eq!(cmd.parse_line("LT M 80"), "LIMIT SET\n");
+        assert_eq!(cmd.table.temp_limit_motor(), 80.0);
+
+        // New queries coexist with them, including the NAN sentinel.
+        assert_eq!(cmd.parse_line("PWR"), "NAN\n");
+        assert_eq!(cmd.parse_line("CAP"), "00000000\n");
+        // Single-letter motor grammar still dispatches correctly.
+        assert_eq!(cmd.parse_line("M0 C 3"), "MODE SET\n");
+        assert_eq!(cmd.parse_line("P 35.5"), "P GAIN SET\n");
+        assert_eq!(cmd.parse_line("V 0.5"), "V GAIN SET\n");
     }
 }

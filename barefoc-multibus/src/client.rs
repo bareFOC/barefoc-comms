@@ -14,14 +14,18 @@
 //! upstream `ref/Miniata/firmware/src/comm_i2c.cpp` register-pointer idiom, design D3)
 //!
 //! ```text
-//! write_register:  I2C  [START][addr+W][reg][d0..dn][STOP]
-//!                  SPI  [CS↓ reg][CS↑ payload]          (one transaction)
-//! read_register:   I2C  [START][addr+W][reg][STOP]        (pointer latch)
+//! write_register:  I2C  [START][addr+W][reg_hi][reg_lo][d0..dn][STOP]
+//!                  SPI  [CS↓ reg_hi reg_lo][CS↑ payload]  (one transaction)
+//! read_register:   I2C  [START][addr+W][reg_hi][reg_lo][STOP]  (pointer latch)
 //!                       [START][addr+R][b0..b(len-1)][STOP]; little-endian stream
-//!                  SPI  [CS↓ reg][CS↑]                    (pointer latch frame)
+//!                  SPI  [CS↓ reg_hi reg_lo][CS↑]          (pointer latch frame)
 //!                       [CS↓ clock-in len bytes][CS↑]     (reply-in-next-CS-frame,
 //!                                                          TMC-style per design)
 //! ```
+//!
+//! The register pointer is a **two-byte big-endian address** (design D5),
+//! matching `barefoc-master`'s `I2cTransport` and allowing canonical Control
+//! Table offsets at `0x180+` to be addressed without modulo-256 aliases.
 //!
 //! The pointer auto-increments server-side by every streamed byte, so spanning reads
 //! and writes behave identically to the `RegMap` memory-map idiom.
@@ -53,10 +57,10 @@ pub enum ClientError<E> {
 /// I2C (7-bit) controller-side client of the register-pointer protocol.
 ///
 /// Generic over `embedded_hal::i2c::I2c` (default `SevenBitAddress` addressing).
-/// Because `I2c::write` requires one contiguous frame, the pointer byte and payload
-/// are staged in an internal fixed-size frame buffer (`TX_BUF`, default `8`, which
-/// comfortably holds the pointer byte plus a 4-byte LE `f32` register); payloads
-/// larger than `TX_BUF - 1` are reported as [`ClientError::TxFrameTooLarge`].
+/// Because `I2c::write` requires one contiguous frame, the two-byte pointer and
+/// payload are staged in an internal fixed-size frame buffer (`TX_BUF`, default
+/// `8`, which comfortably holds the pointer plus a 4-byte LE `f32` register);
+/// payloads larger than `TX_BUF - 2` are reported as [`ClientError::TxFrameTooLarge`].
 ///
 /// Upstream Reference: `ref/Miniata/firmware/src/comm_i2c.cpp` (register-pointer
 /// idiom; the `0xFF` burst protocol is intentionally not ported — design D3).
@@ -70,41 +74,43 @@ impl<B: I2c, const TX_BUF: usize> RegClientI2c<B, TX_BUF> {
         Self { bus }
     }
 
-    /// Writes register `reg` (pointer latch) followed by the little-endian payload
-    /// `bytes` in a single master write transaction, exactly matching the server-side
-    /// `write_phase` frame `[reg][d0..dn]`.
+    /// Writes register `reg` (two-byte big-endian pointer latch) followed by the
+    /// little-endian payload `bytes` in a single master write transaction, exactly
+    /// matching the server-side `write_phase` frame `[reg_hi][reg_lo][d0..dn]`.
     pub fn write_register(
         &mut self,
         addr: u8,
-        reg: u8,
+        reg: u16,
         bytes: &[u8],
     ) -> Result<(), ClientError<B::Error>> {
-        if 1 + bytes.len() > TX_BUF {
+        if 2 + bytes.len() > TX_BUF {
             return Err(ClientError::TxFrameTooLarge);
         }
         let mut frame = [0u8; TX_BUF];
-        frame[0] = reg;
-        frame[1..1 + bytes.len()].copy_from_slice(bytes);
+        frame[0] = (reg >> 8) as u8;
+        frame[1] = reg as u8;
+        frame[2..2 + bytes.len()].copy_from_slice(bytes);
         self.bus
-            .write(addr, &frame[..1 + bytes.len()])
+            .write(addr, &frame[..2 + bytes.len()])
             .map_err(ClientError::Bus)
     }
 
-    /// Latches the register pointer with a `[reg]` write transaction, then reads
-    /// exactly `len` little-endian bytes into `out` in a separate read transaction
-    /// (`out.len() >= len`). Auto-increment on the server streams across register
-    /// boundaries; little-endian float bytes are returned verbatim.
+    /// Latches the register pointer with a `[reg_hi, reg_lo]` write transaction,
+    /// then reads exactly `len` little-endian bytes into `out` in a separate read
+    /// transaction (`out.len() >= len`). Auto-increment on the server streams across
+    /// register boundaries; little-endian float bytes are returned verbatim.
     pub fn read_register(
         &mut self,
         addr: u8,
-        reg: u8,
+        reg: u16,
         len: usize,
         out: &mut [u8],
     ) -> Result<(), ClientError<B::Error>> {
         if out.len() < len {
             return Err(ClientError::RxBufferTooSmall);
         }
-        self.bus.write(addr, &[reg]).map_err(ClientError::Bus)?;
+        let pointer = [(reg >> 8) as u8, reg as u8];
+        self.bus.write(addr, &pointer).map_err(ClientError::Bus)?;
         self.bus
             .read(addr, &mut out[..len])
             .map_err(ClientError::Bus)
@@ -118,11 +124,11 @@ impl<B: I2c, const TX_BUF: usize> RegClientI2c<B, TX_BUF> {
 /// `SpiDevice` implementation. Frame layout ("reply-in-next-CS-frame", TMC-style —
 /// decision recorded in the change design):
 ///
-/// - write: one frame carrying `[reg][payload...]` via sequential
-///   [`Operation::Write`] ops (pointer byte op + payload op; no intermediate
+/// - write: one frame carrying `[reg_hi, reg_lo][payload...]` via sequential
+///   [`Operation::Write`] ops (two-byte pointer op + payload op; no intermediate
 ///   staging buffer needed),
-/// - read: frame 1 latches the pointer (`[reg]`); frame 2 clocks `len` bytes in
-///   ([`Operation::Read`]), little-endian from the server's latched pointer.
+/// - read: frame 1 latches the pointer (`[reg_hi, reg_lo]`); frame 2 clocks `len`
+///   bytes in ([`Operation::Read`]), little-endian from the server's latched pointer.
 pub struct RegClientSpi<B> {
     bus: B,
 }
@@ -135,18 +141,17 @@ impl<B: SpiDevice> RegClientSpi<B> {
 
     /// Writes register `reg` followed by the little-endian payload `bytes` within a
     /// single CS frame: the wire bytes are exactly the server `write_phase` frame
-    /// `[reg][d0..dn]`.
-    pub fn write_register(&mut self, reg: u8, bytes: &[u8]) -> Result<(), ClientError<B::Error>> {
+    /// `[reg_hi][reg_lo][d0..dn]`.
+    pub fn write_register(&mut self, reg: u16, bytes: &[u8]) -> Result<(), ClientError<B::Error>> {
         // One CS frame = one transaction. A single dedicated Write op avoids
-        // fragmentation; a pointer byte + payload pair yields the exact server frame.
+        // fragmentation; a two-byte pointer + payload pair yields the exact server frame.
+        let reg_arr = [(reg >> 8) as u8, reg as u8];
         if bytes.is_empty() {
-            let reg_arr = [reg];
             return self
                 .bus
                 .transaction(&mut [Operation::Write(&reg_arr[..])])
                 .map_err(ClientError::Bus);
         }
-        let reg_arr = [reg];
         let mut ops = [Operation::Write(&reg_arr[..]), Operation::Write(bytes)];
         self.bus.transaction(&mut ops).map_err(ClientError::Bus)
     }
@@ -155,15 +160,15 @@ impl<B: SpiDevice> RegClientSpi<B> {
     /// bytes in during the next CS frame into `out` (`out.len() >= len`).
     pub fn read_register(
         &mut self,
-        reg: u8,
+        reg: u16,
         len: usize,
         out: &mut [u8],
     ) -> Result<(), ClientError<B::Error>> {
         if out.len() < len {
             return Err(ClientError::RxBufferTooSmall);
         }
-        // CS frame 1: pointer latch.
-        let reg_arr = [reg];
+        // CS frame 1: two-byte big-endian pointer latch.
+        let reg_arr = [(reg >> 8) as u8, reg as u8];
         self.bus
             .transaction(&mut [Operation::Write(&reg_arr[..])])
             .map_err(ClientError::Bus)?;
@@ -202,7 +207,7 @@ mod tests {
 
     /// Self-clearing REG_SYSTEM_CMD-style hook (upstream control_table.cpp
     /// checkAndClearCommand semantics).
-    fn sys_cmd_hook(ctx: &mut Handler, _offset: u8, value: &[u8]) -> HookResult {
+    fn sys_cmd_hook(ctx: &mut Handler, _offset: u16, value: &[u8]) -> HookResult {
         ctx.log[ctx.log_len] = value[0];
         ctx.log_len += 1;
         HookResult::SelfClear
@@ -359,8 +364,8 @@ mod tests {
         // Client write_register: single write transaction [reg][payload].
         // Client read_register: [reg] latch write, then 4 LE bytes (12.5) streamed.
         let expectations = [
-            I2cTx::write(DEV, vec![0x14, 0, 0, 0x48, 0x41]), // WRITE: pointer + payload (12.5 LE)
-            I2cTx::write(DEV, vec![0x14]),                   // READ: pointer latch
+            I2cTx::write(DEV, vec![0x00, 0x14, 0, 0, 0x48, 0x41]), // WRITE: pointer + payload (12.5 LE)
+            I2cTx::write(DEV, vec![0x00, 0x14]),                   // READ: pointer latch
             I2cTx::read(DEV, vec![0, 0, 0x48, 0x41]),        // READ: 4 LE bytes = 12.5
         ];
         let mut bus = I2cMock::new(&expectations);
@@ -378,7 +383,7 @@ mod tests {
     #[test]
     fn i2c_client_maps_scripted_bus_error() {
         let expectations = [
-            I2cTx::write(DEV, vec![0x50, 5]).with_error(eh_i2c::ErrorKind::NoAcknowledge(
+            I2cTx::write(DEV, vec![0x00, 0x50, 5]).with_error(eh_i2c::ErrorKind::NoAcknowledge(
                 eh_i2c::NoAcknowledgeSource::Address,
             )),
         ];
@@ -395,7 +400,7 @@ mod tests {
 
     #[test]
     fn i2c_client_staging_and_buffer_validation() {
-        let expectations = [I2cTx::write(DEV, vec![0x14, 1, 2, 3, 4])];
+        let expectations = [I2cTx::write(DEV, vec![0x00, 0x14, 1, 2, 3, 4])];
         let mut bus = I2cMock::new(&expectations);
         let mut client = RegClientI2c::<_, 8>::new(&mut bus);
         // Payload does not fit the 8-byte staging frame: error with no bus traffic.
@@ -557,9 +562,9 @@ mod tests {
         // read_register(reg, 4) → CS frame 1 [reg] latch; CS frame 2: 4 LE bytes.
         let le = 12.5f32.to_le_bytes();
         let expectations = [
-            SpiTx::write_vec(vec![0x14]), // CS frame, op 1: pointer byte
+            SpiTx::write_vec(vec![0x00, 0x14]), // CS frame, op 1: pointer byte
             SpiTx::write_vec(vec![le[0], le[1], le[2], le[3]]), // CS frame, op 2: payload
-            SpiTx::write_vec(vec![0x14]), // latch frame of the read
+            SpiTx::write_vec(vec![0x00, 0x14]), // latch frame of the read
             SpiTx::read_vec(vec![le[0], le[1], le[2], le[3]]),
         ];
         let mut bus = SpiMock::new(&expectations);

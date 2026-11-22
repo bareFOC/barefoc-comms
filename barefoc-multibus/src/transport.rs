@@ -23,16 +23,18 @@ use crate::table::{Error, RegMap};
 /// requests. Nothing in this trait mentions a specific platform or bus.
 ///
 /// Wire semantics are the design D3 register-pointer idiom
-/// (`ref/Miniata/firmware/src/comm_i2c.cpp`):
+/// (`ref/Miniata/firmware/src/comm_i2c.cpp`), with the 16-bit pointer widening
+/// from `extended-telemetry-controls` D5:
 ///
-/// - write phase: `[ptr]` latches the register pointer without modifying anything;
-///   `[ptr, d0..dn]` latches, then writes `n` little-endian bytes at `ptr`.
+/// - write phase: `[ptr_hi, ptr_lo]` latches the register pointer without
+///   modifying anything; `[ptr_hi, ptr_lo, d0..dn]` latches, then writes `n`
+///   little-endian bytes at the 16-bit pointer.
 /// - read phase: `len` bytes streamed from the latched pointer, little-endian,
 ///   auto-increment, crossing register boundaries as a plain memory-map read.
 pub trait TargetTransport {
-    /// Delivers one bus write-phase frame (pointer byte optionally followed by
-    /// payload bytes). Errors are reported back to the bus adapter so it can map
-    /// them to its native error condition (e.g. I2C NAK).
+    /// Delivers one bus write-phase frame (two-byte big-endian pointer optionally
+    /// followed by payload bytes). Errors are reported back to the bus adapter so
+    /// it can map them to its native error condition (e.g. I2C NAK).
     fn on_write(&mut self, data: &[u8]) -> Result<(), Error>;
 
     /// Serves one bus read-phase request of exactly `len` bytes into `out`
@@ -142,10 +144,10 @@ mod tests {
     fn regserver_lowens_bus_events_for_glue_layers() {
         let mut server = server();
         // Pointer latch to REG 0x08, then a 4-byte read phase.
-        assert_eq!(glue_session(&mut server, &[&[0x08]], 4).unwrap(), 4);
+        assert_eq!(glue_session(&mut server, &[&[0x00, 0x08]], 4).unwrap(), 4);
         // Pointer latch + payload write phase (single frame).
         assert_eq!(
-            glue_session(&mut server, &[&[0x08, 0x11, 0x22, 0x33, 0x44]], 0).unwrap(),
+            glue_session(&mut server, &[&[0x00, 0x08, 0x11, 0x22, 0x33, 0x44]], 0).unwrap(),
             0
         );
         assert_eq!(server.map().pointer(), 0x0C);
@@ -155,16 +157,16 @@ mod tests {
     fn regserver_maps_error_back_to_the_bus_adapter() {
         let mut server = server();
         // Unmapped pointer: adapter receives the error and maps it (NAK upstream).
-        assert_eq!(server.on_write(&[0xFE]), Err(Error::Unmapped));
+        assert_eq!(server.on_write(&[0x00, 0xFE]), Err(Error::Unmapped));
         // Read beyond the extent: full-frame rejection.
-        server.on_write(&[0x20]).unwrap();
+        server.on_write(&[0x00, 0x20]).unwrap();
         let mut out = [0u8; 64];
         assert_eq!(server.on_read(8, &mut out), Err(Error::Unmapped));
         // Adapter-independence: the RegMap itself also implements the trait, so glue
         // may embed the map directly without the server wrapper.
         let mut bare =
             RegMap::<(), 64, 4>::new(()).register(RegEntry::ro(0x20, 4)).unwrap();
-        assert_eq!(bare.on_write(&[0x20]), Ok(()));
+        assert_eq!(bare.on_write(&[0x00, 0x20]), Ok(()));
         assert_eq!(bare.on_read(4, &mut out).unwrap(), 4);
     }
 
@@ -176,12 +178,12 @@ mod tests {
             .map_mut()
             .set(0x20, &0.75f32.to_le_bytes())
             .unwrap();
-        server.on_write(&[0x20]).unwrap();
+        server.on_write(&[0x00, 0x20]).unwrap();
         let mut out = [0u8; 4];
         server.on_read(4, &mut out).unwrap();
         assert_eq!(f32::from_le_bytes(out), 0.75);
         // Ro enforcement is upstream-accurate over the bus.
-        assert_eq!(server.on_write(&[0x20, 0, 0, 0, 0]), Err(Error::ReadOnly));
+        assert_eq!(server.on_write(&[0x00, 0x20, 0, 0, 0, 0]), Err(Error::ReadOnly));
         let _ = AccessMode::Rw;
         let _ = core::mem::size_of::<HookResult>();
         let _ = server.into_map();

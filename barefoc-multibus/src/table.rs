@@ -19,16 +19,20 @@
 //!   (upstream `comm_i2c.cpp` register-pointer idiom, minus the `0xFF` burst protocol,
 //!   which is intentionally not ported — see `design.md` D3).
 //!
-//! ## Wire protocol (design D3)
+//! ## Wire protocol (design D3, pointer widened in `extended-telemetry-controls` D5)
 //!
 //! ```text
-//! write phase: [ptr]              latches the register pointer (no state modification)
-//!              [ptr, d0..dn]      latches, then writes n LE bytes starting at ptr
+//! write phase: [ptr_hi, ptr_lo]              latches the 16-bit register pointer
+//!              [ptr_hi, ptr_lo, d0..dn]      latches, then writes n LE bytes at ptr
 //! read phase:  N bytes from latched ptr, LE, auto-increment across registers
 //! ```
 //!
-//! The pointer auto-advances by every processed byte (write payload and read burst
-//! alike) — a plain memory-map idiom, no per-register framing on the wire.
+//! The pointer is a **two-byte big-endian register address**, matching the wire
+//! format of `barefoc-master`'s `I2cTransport`. It auto-advances by every
+//! processed byte (write payload and read burst alike) — a plain memory-map
+//! idiom, no per-register framing on the wire. Widening from 8 to 16 bits lets
+//! canonical Control Table offsets at `0x180+` be addressed without modulo-256
+//! aliases into the motor bank.
 //!
 //! ## Concurrency contract (design D4)
 //!
@@ -76,7 +80,7 @@ pub enum HookResult {
 /// of the application handler context and a shared little-endian view of the freshly
 /// written register bytes. It runs synchronously in the single drain task (design D4)
 /// and must not block.
-pub type WriteHookFn<C> = fn(&mut C, u8, &[u8]) -> HookResult;
+pub type WriteHookFn<C> = fn(&mut C, u16, &[u8]) -> HookResult;
 
 /// One register descriptor. Declaratively declared by application register profiles
 /// via [`RegEntry::rw`] / [`RegEntry::ro`] / [`RegEntry::rw_hooked`] and
@@ -86,8 +90,12 @@ pub type WriteHookFn<C> = fn(&mut C, u8, &[u8]) -> HookResult;
 /// plain-value type (`Copy`/`Clone` regardless of the handler context type `C`, since
 /// it only holds a function pointer and scalars).
 pub struct RegEntry<C> {
-    /// Byte offset of the register start inside the map bank.
-    pub offset: u8,
+    /// 16-bit byte offset of the register start inside the map bank.
+    ///
+    /// Widened from `u8` in `extended-telemetry-controls` D5 so registers at
+    /// canonical Control Table offsets `>= 0x100` are addressable without
+    /// aliasing modulo 256.
+    pub offset: u16,
     /// Byte width of the register (`1` for byte registers like `REG_SYSTEM_CMD`,
     /// `4` for little-endian `f32` registers like `REG_TARGET_VEL`).
     pub width: u8,
@@ -100,7 +108,7 @@ pub struct RegEntry<C> {
 
 impl<C> RegEntry<C> {
     /// Read-write register descriptor without a hook.
-    pub const fn rw(offset: u8, width: u8) -> Self {
+    pub const fn rw(offset: u16, width: u8) -> Self {
         Self {
             offset,
             width,
@@ -110,7 +118,7 @@ impl<C> RegEntry<C> {
     }
 
     /// Read-only register descriptor without a hook.
-    pub const fn ro(offset: u8, width: u8) -> Self {
+    pub const fn ro(offset: u16, width: u8) -> Self {
         Self {
             offset,
             width,
@@ -121,7 +129,7 @@ impl<C> RegEntry<C> {
 
     /// Read-write register descriptor with a write hook (command register, e.g.
     /// upstream `REG_SYSTEM_CMD` semantics via [`HookResult::SelfClear`]).
-    pub const fn rw_hooked(offset: u8, width: u8, hook: WriteHookFn<C>) -> Self {
+    pub const fn rw_hooked(offset: u16, width: u8, hook: WriteHookFn<C>) -> Self {
         Self {
             offset,
             width,
@@ -194,8 +202,8 @@ pub struct RegMap<C, const CAP: usize, const MAX_ENTRIES: usize> {
     /// (hook fires) when its declared width is reached (spec: *Width-checked partial
     /// writes*).
     received: [u8; MAX_ENTRIES],
-    /// Latched register pointer (auto-incrementing across read/write phases).
-    ptr: u8,
+    /// Latched 16-bit register pointer (auto-incrementing across read/write phases).
+    ptr: u16,
     /// Application handler context handed to write hooks.
     ctx: C,
 }
@@ -265,9 +273,10 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
         self.extent
     }
 
-    /// Latched register pointer (diagnostics / glue test support; design D3 pointer
-    /// latch + auto-increment idiom from `comm_i2c.cpp`).
-    pub fn pointer(&self) -> u8 {
+    /// Latched 16-bit register pointer (diagnostics / glue test support; design D3
+    /// pointer latch + auto-increment idiom from `comm_i2c.cpp`, widened to 16 bits
+    /// in `extended-telemetry-controls` D5).
+    pub fn pointer(&self) -> u16 {
         self.ptr
     }
 
@@ -277,9 +286,9 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
     }
 
     /// Bus write-phase entry point (design D3): `data` is the raw write-phase frame —
-    /// first byte is the register pointer, remaining bytes the little-endian payload.
-    /// An empty frame is a no-op. A frame consisting of only the pointer byte latches
-    /// the pointer without modifying anything.
+    /// the first two bytes are the big-endian 16-bit register pointer, remaining bytes
+    /// the little-endian payload. An empty frame is a no-op. A frame consisting of only
+    /// the pointer latches it without modifying anything.
     ///
     /// Validation happens for the *whole phase* before any byte is applied:
     /// pointer in range (else [`Error::Unmapped`]), payload range within extent
@@ -300,16 +309,20 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
         if data.is_empty() {
             return Ok(());
         }
-        let start = usize::from(data[0]);
+        // Two-byte big-endian register pointer (D5; matches barefoc-master I2cTransport).
+        if data.len() < 2 {
+            return Err(Error::Unmapped);
+        }
+        let start = usize::from(u16::from_be_bytes([data[0], data[1]]));
         if start >= self.extent {
             return Err(Error::Unmapped);
         }
-        if data.len() == 1 {
+        if data.len() == 2 {
             // Pointer-only phase: latch, no state modification (design D3).
-            self.ptr = data[0];
+            self.ptr = start as u16;
             return Ok(());
         }
-        let payload = &data[1..];
+        let payload = &data[2..];
         let end = start + payload.len();
         if end > self.extent {
             return Err(Error::Unmapped);
@@ -327,7 +340,7 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
             }
         }
         // Latch the pointer and apply the payload with auto-increment.
-        self.ptr = end as u8;
+        self.ptr = end as u16;
         self.bank[start..end].copy_from_slice(payload);
         // Per-register bookkeeping and hook dispatch.
         for i in 0..self.entry_count {
@@ -386,7 +399,7 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
             return Err(Error::Unmapped);
         }
         out[..len].copy_from_slice(&self.bank[ptr..ptr + len]);
-        self.ptr = (ptr + len) as u8;
+        self.ptr = (ptr + len) as u16;
         Ok(len)
     }
 
@@ -397,7 +410,7 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
     ///
     /// Upstream Reference: `ref/Miniata/firmware/src/control_table.cpp`
     /// `writeRegister()` (width-validated analog).
-    pub fn set(&mut self, offset: u8, bytes: &[u8]) -> Result<(), Error> {
+    pub fn set(&mut self, offset: u16, bytes: &[u8]) -> Result<(), Error> {
         let (idx, entry) = self.find_entry(offset).ok_or(Error::Unmapped)?;
         let w = usize::from(entry.width);
         if bytes.len() != w {
@@ -414,7 +427,7 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
     ///
     /// Upstream Reference: `ref/Miniata/firmware/src/control_table.cpp`
     /// `readRegister()`.
-    pub fn get(&self, offset: u8, out: &mut [u8]) -> Result<usize, Error> {
+    pub fn get(&self, offset: u16, out: &mut [u8]) -> Result<usize, Error> {
         let (_, entry) = self.find_entry(offset).ok_or(Error::Unmapped)?;
         let w = usize::from(entry.width);
         if out.len() < w {
@@ -425,7 +438,7 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
         Ok(w)
     }
 
-    fn find_entry(&self, offset: u8) -> Option<(usize, RegEntry<C>)> {
+    fn find_entry(&self, offset: u16) -> Option<(usize, RegEntry<C>)> {
         for i in 0..self.entry_count {
             if let Some(entry) = self.entries[i] {
                 if entry.offset == offset {
@@ -469,12 +482,12 @@ mod tests {
         }
     }
 
-    fn sys_cmd_hook(ctx: &mut Handler, _offset: u8, value: &[u8]) -> HookResult {
+    fn sys_cmd_hook(ctx: &mut Handler, _offset: u16, value: &[u8]) -> HookResult {
         ctx.log.push(value[0]);
         HookResult::SelfClear
     }
 
-    fn vel_hook(ctx: &mut Handler, _offset: u8, _value: &[u8]) -> HookResult {
+    fn vel_hook(ctx: &mut Handler, _offset: u16, _value: &[u8]) -> HookResult {
         ctx.log.push(0xEE);
         HookResult::Applied
     }
@@ -526,9 +539,9 @@ mod tests {
     fn unmapped_pointer_latch_is_rejected_without_state_change() {
         let mut map = mini_map(); // extent = 0x51
         let before = map.pointer();
-        assert_eq!(map.write_phase(&[0xFE]), Err(Error::Unmapped));
+        assert_eq!(map.write_phase(&[0x00, 0xFE]), Err(Error::Unmapped));
         assert_eq!(map.pointer(), before);
-        assert_eq!(map.write_phase(&[0x54]), Err(Error::Unmapped)); // beyond extent
+        assert_eq!(map.write_phase(&[0x00, 0x54]), Err(Error::Unmapped)); // beyond extent
         assert_eq!(map.pointer(), before);
     }
 
@@ -537,7 +550,7 @@ mod tests {
         let mut map = mini_map();
         map.set(0x3C, &le_f32(1.5)).unwrap();
         // Payload [0x50 + 3 bytes] would run off the extent (0x51).
-        assert_eq!(map.write_phase(&[0x4E, 0, 0, 0, 0]), Err(Error::Unmapped));
+        assert_eq!(map.write_phase(&[0x00, 0x4E, 0, 0, 0, 0]), Err(Error::Unmapped));
         let mut out = [0u8; 4];
         map.get(0x3C, &mut out).unwrap();
         assert_eq!(out, le_f32(1.5), "no byte may move on a rejected phase");
@@ -549,7 +562,7 @@ mod tests {
     fn unmapped_read_is_rejected_and_pointer_unchanged() {
         let mut map = mini_map();
         // Latch 0x4E then request 8 bytes: 0x4E + 8 > extent 0x51.
-        map.write_phase(&[0x4E]).unwrap();
+        map.write_phase(&[0x00, 0x4E]).unwrap();
         let mut out = [0u8; 8];
         assert_eq!(map.read_phase(8, &mut out), Err(Error::Unmapped));
         assert_eq!(map.pointer(), 0x4E, "rejected reads must not move the pointer");
@@ -566,7 +579,7 @@ mod tests {
         map.set(0x24, &le_f32(2.0)).unwrap();
         map.set(0x28, &le_f32(3.0)).unwrap();
         map.set(0x2C, &le_f32(4.0)).unwrap();
-        map.write_phase(&[0x20]).unwrap(); // pointer latch, no state modification
+        map.write_phase(&[0x00, 0x20]).unwrap(); // pointer latch, no state modification
         assert_eq!(map.pointer(), 0x20);
         let mut out = [0u8; 16];
         assert_eq!(map.read_phase(16, &mut out).unwrap(), 16);
@@ -588,16 +601,16 @@ mod tests {
     fn le_float_roundtrip_write_then_read() {
         let mut map = mini_map();
         // Bus write phase: [0x14, 12.5f32 LE] (spec: *Pointer latch then write*).
-        map.write_phase(&[0x14]).unwrap();
+        map.write_phase(&[0x00, 0x14]).unwrap();
         let mut out = [0u8; 4];
         assert_eq!(map.read_phase(4, &mut out).unwrap(), 4);
         // Fresh float write through the bus path.
-        map.write_phase(&[0x14, le_f32(12.5)[0], le_f32(12.5)[1], le_f32(12.5)[2], le_f32(12.5)[3]])
+        map.write_phase(&[0x00, 0x14, le_f32(12.5)[0], le_f32(12.5)[1], le_f32(12.5)[2], le_f32(12.5)[3]])
             .unwrap();
         map.get(0x14, &mut out).unwrap();
         assert_eq!(f32::from_le_bytes(out), 12.5);
         // Read back through the wire path.
-        map.write_phase(&[0x14]).unwrap();
+        map.write_phase(&[0x00, 0x14]).unwrap();
         let mut wire = [0u8; 4];
         map.read_phase(4, &mut wire).unwrap();
         assert_eq!(f32::from_le_bytes(wire), 12.5);
@@ -615,10 +628,10 @@ mod tests {
         let b = le_f32(3.25);
         // Fewer bytes than the declared width: buffered in the register's storage,
         // register not applied yet (no hook).
-        map.write_phase(&[0x14, b[0], b[1]]).unwrap();
+        map.write_phase(&[0x00, 0x14, b[0], b[1]]).unwrap();
         assert!(map.handler().log.len == 0, "hook must not fire before completion");
         // Completion phase starting mid-register (continuation).
-        map.write_phase(&[0x16, b[2], b[3]]).unwrap();
+        map.write_phase(&[0x00, 0x16, b[2], b[3]]).unwrap();
         assert_eq!(map.handler().log.len, 1, "hook fires exactly once on completion");
         assert_eq!(map.handler().log.items[0], 0xEE);
         let mut out = [0u8; 4];
@@ -633,11 +646,12 @@ mod tests {
             .unwrap()
             .register(RegEntry::rw_hooked(0x24, 4, vel_hook))
             .unwrap();
-        // One continuous write payload crossing both registers.
-        let mut frame = [0u8; 9];
-        frame[0] = 0x20;
-        frame[1..5].copy_from_slice(&le_f32(1.5));
-        frame[5..9].copy_from_slice(&le_f32(2.5));
+        // One continuous write payload crossing both registers (2-byte BE pointer).
+        let mut frame = [0u8; 10];
+        frame[0] = 0x00;
+        frame[1] = 0x20;
+        frame[2..6].copy_from_slice(&le_f32(1.5));
+        frame[6..10].copy_from_slice(&le_f32(2.5));
         map.write_phase(&frame).unwrap();
         assert_eq!(map.handler().log.len, 2, "each completed register fires once");
         let mut out = [0u8; 4];
@@ -651,10 +665,10 @@ mod tests {
     fn read_only_write_rejected_without_state_change() {
         let mut map = mini_map();
         map.set(0x20, &le_f32(7.0)).unwrap(); // Ro telemetry published app-side
-        map.write_phase(&[0x14, 0, 0, 0, 0]).unwrap(); // now pointer at 0x18
+        map.write_phase(&[0x00, 0x14, 0, 0, 0, 0]).unwrap(); // now pointer at 0x18
         // Direct Ro write: rejected, value intact.
         assert_eq!(
-            map.write_phase(&[0x20, 1, 2, 3, 4]),
+            map.write_phase(&[0x00, 0x20, 1, 2, 3, 4]),
             Err(Error::ReadOnly)
         );
         let mut out = [0u8; 4];
@@ -663,12 +677,12 @@ mod tests {
         // Mixed phase [0x1C..0x24] spans an RW byte range and the Ro register 0x20:
         // the WHOLE phase must be rejected and the RW bytes untouched too.
         map.add_register(RegEntry::rw(0x1C, 4)).unwrap();
-        map.write_phase(&[0x1C, 0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0])
+        map.write_phase(&[0x00, 0x1C, 0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0])
             .unwrap_err();
         map.get(0x1C, &mut out).unwrap();
         assert_eq!(out, [0, 0, 0, 0], "rejected mixed phase must not touch any register");
         // But Ro pointer latches are legal (that is how hosts read telemetry).
-        map.write_phase(&[0x20]).unwrap();
+        map.write_phase(&[0x00, 0x20]).unwrap();
         assert_eq!(map.pointer(), 0x20);
     }
 
@@ -676,14 +690,14 @@ mod tests {
     fn self_clearing_system_command_hook() {
         let mut map = mini_map();
         // CMD_REBOOT_BOOTLOADER = 5 (upstream control_table.h SystemCmd).
-        map.write_phase(&[0x50, 5]).unwrap();
+        map.write_phase(&[0x00, 0x50, 5]).unwrap();
         assert_eq!(map.handler().log.len, 1);
         assert_eq!(map.handler().log.items[0], 5);
         let mut out = [0u8; 1];
         map.get(0x50, &mut out).unwrap();
         assert_eq!(out[0], 0, "REG_SYSTEM_CMD self-clears after the hook runs");
         // Writing CMD_NONE (0) afterwards is a normal write, hook still runs.
-        map.write_phase(&[0x50, 0]).unwrap();
+        map.write_phase(&[0x00, 0x50, 0]).unwrap();
         assert_eq!(map.handler().log.len, 2);
         assert_eq!(map.handler().log.items[1], 0);
     }
@@ -698,7 +712,7 @@ mod tests {
         let mut map: MiniMap = MiniMap::new(Handler::default())
             .register(RegEntry::rw_hooked(0x50, 1, hook))
             .unwrap();
-        map.write_phase(&[0x50, 1]).unwrap();
+        map.write_phase(&[0x00, 0x50, 1]).unwrap();
         assert_eq!(map.handler().log.len, 1);
     }
 
@@ -734,9 +748,9 @@ mod tests {
             .register(RegEntry::rw(0x08, 4))
             .unwrap();
         // Write into the padding hole: harmless, no hook, stored.
-        map.write_phase(&[0x06, 0xA5, 0x5A]).unwrap();
+        map.write_phase(&[0x00, 0x06, 0xA5, 0x5A]).unwrap();
         // Read across boundary 0x05..0x09: continuous stream over pad + register.
-        map.write_phase(&[0x05]).unwrap();
+        map.write_phase(&[0x00, 0x05]).unwrap();
         let mut out = [0u8; 4];
         map.read_phase(4, &mut out).unwrap();
         assert_eq!(out[0], 0x00); // untouched mapped byte
@@ -751,5 +765,40 @@ mod tests {
         assert_eq!(map.write_phase(&[]), Ok(()));
         assert_eq!(map.pointer(), 0);
         assert_eq!(map.read_phase(0, &mut []), Ok(0));
+    }
+
+    #[test]
+    fn short_pointer_latch_is_rejected() {
+        let mut map = mini_map();
+        assert_eq!(map.write_phase(&[0x14]), Err(Error::Unmapped));
+        assert_eq!(map.pointer(), 0);
+    }
+
+    #[test]
+    fn u16_pointer_reaches_canonical_0x180_offsets_without_aliasing() {
+        let mut map: RegMap<Handler, 512, 4> = RegMap::new(Handler::default())
+            .register(RegEntry::ro(0x180, 4))
+            .unwrap()
+            .register(RegEntry::rw(0x184, 4))
+            .unwrap();
+        map.set(0x180, &le_f32(3.5)).unwrap();
+
+        // Two-byte big-endian pointer latch [0x01, 0x80].
+        map.write_phase(&[0x01, 0x80]).unwrap();
+        assert_eq!(map.pointer(), 0x0180);
+        let mut out = [0u8; 4];
+        map.read_phase(4, &mut out).unwrap();
+        assert_eq!(f32::from_le_bytes(out), 3.5);
+        assert_eq!(map.pointer(), 0x0184);
+
+        // Application-side canonical access also uses the widened offset.
+        map.set(0x184, &le_f32(9.25)).unwrap();
+        assert_eq!(map.get(0x184, &mut out).unwrap(), 4);
+        assert_eq!(f32::from_le_bytes(out), 9.25);
+
+        // The modulo-256 alias 0x80 is not a register, even though the bank
+        // extent now covers it; only the canonical 0x180 descriptor exists.
+        assert_eq!(map.get(0x80, &mut out), Err(Error::Unmapped));
+        assert_eq!(map.get(0x180, &mut out).unwrap(), 4);
     }
 }

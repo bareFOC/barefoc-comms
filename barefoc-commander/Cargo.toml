@@ -9,6 +9,7 @@ description = "Pure-Rust, no_std implementation of the SimpleFOC Commander ASCII
 
 [dependencies]
 barefoc = { path = "../../bareFOC", default-features = false, features = ["boot"], optional = true }
+libm = { workspace = true }
 embedded-io = { workspace = true, optional = true }
 defmt = { workspace = true, optional = true }
 
