@@ -5,6 +5,7 @@ members = [
     "barefoc-fibre",
     "barefoc-multibus",
     "barefoc-rtt",
+    "cu_barefoc",
 ]
 
 [workspace.package]
