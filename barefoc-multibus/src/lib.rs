@@ -70,6 +70,7 @@ pub mod control_table_bridge {
 pub mod client;
 pub mod multi_id;
 pub mod servo_protocol;
+pub mod strobe;
 pub mod table;
 pub mod transport;
 
@@ -82,5 +83,11 @@ pub use servo_protocol::{
 };
 #[cfg(feature = "kinematics")]
 pub use servo_protocol::apply_sync_write_to_assembly;
+pub use strobe::{
+    is_bootloader_strobe, is_i3c_bootloader_strobe, I2C_CMD_ENTER_BOOTLOADER,
+    I3C_CCC_RSTACT_BCAST, I3C_CCC_RSTACT_DIRECT, I3C_RSTACT_TARGET_RESET,
+};
+#[cfg(feature = "control-table")]
+pub use strobe::multibus_isr_strobe_hook;
 pub use table::{AccessMode, Error, HookResult, RegEntry, RegMap, WriteHookFn};
 pub use transport::{RegServer, TargetTransport};
