@@ -5,6 +5,7 @@ members = [
     "barefoc-fibre",
     "barefoc-multibus",
     "barefoc-rtt",
+    "barefoc-passthrough",
     "cu_barefoc",
 ]
 

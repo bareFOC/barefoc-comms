@@ -1,0 +1,18 @@
+[package]
+name = "barefoc-passthrough"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "no_std, zero-heap device-side bus-passthrough server with disarmed-only entry and a watchdog-supervised safety FSM."
+
+[dependencies]
+# Host SDK is reused for the frame codec, constants and the inner transport
+# adapters (same path pattern as cu_barefoc); embedded-io stays on 0.6.
+barefoc-master = { path = "../../barefoc-master" }
+embedded-hal = { workspace = true }
+embedded-io = { workspace = true }
+
+[lints]
+workspace = true
