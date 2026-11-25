@@ -175,6 +175,7 @@ impl From<SyncError> for BridgeError {
             SyncError::Empty => "sync group is empty",
             SyncError::TooManyNodes => "too many nodes in sync group",
             SyncError::BufferTooSmall => "sync frame buffer too small",
+            SyncError::LengthMismatch => "sync write target length mismatch",
         }))
     }
 }

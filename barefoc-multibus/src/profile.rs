@@ -619,16 +619,12 @@ mod tests {
         let expectations = [
             // Select motor 0
             I2cTx::write(DEV, vec![sel_be[0], sel_be[1], 0]),
-            // Pointer latch Angle
-            I2cTx::write(DEV, vec![angle_be[0], angle_be[1]]),
-            // Read 4 bytes angle0
-            I2cTx::read(DEV, angle0.to_vec()),
+            // Combined write_read Angle (4 bytes angle0)
+            I2cTx::write_read(DEV, vec![angle_be[0], angle_be[1]], angle0.to_vec()),
             // Select motor 1
             I2cTx::write(DEV, vec![sel_be[0], sel_be[1], 1]),
-            // Pointer latch Angle
-            I2cTx::write(DEV, vec![angle_be[0], angle_be[1]]),
-            // Read 4 bytes angle1
-            I2cTx::read(DEV, angle1.to_vec()),
+            // Combined write_read Angle (4 bytes angle1)
+            I2cTx::write_read(DEV, vec![angle_be[0], angle_be[1]], angle1.to_vec()),
         ];
 
         let mut mock_bus = I2cMock::new(&expectations);

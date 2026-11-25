@@ -763,4 +763,59 @@ mod tests {
                 .is_err());
         }
     }
+
+    #[test]
+    fn test_command_block_burst_16_bytes_roundtrip() {
+        const DEV: u8 = 0x30;
+        let table = ControlTable::new();
+        let ctx = ControlTableContext::new(
+            table,
+            Some(MockStorage { save_count: 0 }),
+            Some(MockBootloader { entered: false }),
+        );
+        let mut server: ProfileServer = RegServer::new(control_table_profile(ctx));
+
+        // 16-byte contiguous command block at 0x12C..0x13B:
+        // [0]     = REG_TORQUE_ENABLE (0x12C) = 1
+        // [1]     = REG_OPERATING_MODE (0x12D) = 2 (Position)
+        // [2..4]  = reserved padding (0x12E..0x12F) = [0, 0]
+        // [4..8]  = REG_GOAL_POSITION (0x130) = 1.5f32 LE
+        // [8..12] = REG_GOAL_VELOCITY (0x134) = 12.25f32 LE
+        // [12..16]= REG_GOAL_CURRENT  (0x138) = 2.5f32 LE
+        let mut payload = [0u8; 16];
+        payload[0] = 1;
+        payload[1] = 2;
+        payload[4..8].copy_from_slice(&1.5f32.to_le_bytes());
+        payload[8..12].copy_from_slice(&12.25f32.to_le_bytes());
+        payload[12..16].copy_from_slice(&2.5f32.to_le_bytes());
+
+        // Uses default RegClientI2c TX_BUF = 32 (no const-generic override needed).
+        {
+            let mut bus = LoopbackI2c { server: &mut server };
+            let mut client: RegClientI2c<_> = RegClientI2c::new(&mut bus);
+            client
+                .write_register(DEV, REG_TORQUE_ENABLE as u16, &payload)
+                .unwrap();
+
+            let mut readback = [0u8; 16];
+            client
+                .read_register(DEV, REG_TORQUE_ENABLE as u16, 16, &mut readback)
+                .unwrap();
+            assert_eq!(readback, payload);
+        }
+
+        // Verify individual register reads from the server map match.
+        let mut b1 = [0u8; 1];
+        let mut b4 = [0u8; 4];
+        server.map().get(REG_TORQUE_ENABLE as u16, &mut b1).unwrap();
+        assert_eq!(b1[0], 1);
+        server.map().get(REG_OPERATING_MODE as u16, &mut b1).unwrap();
+        assert_eq!(b1[0], 2);
+        server.map().get(REG_GOAL_POSITION as u16, &mut b4).unwrap();
+        assert_eq!(f32::from_le_bytes(b4), 1.5);
+        server.map().get(REG_GOAL_VELOCITY as u16, &mut b4).unwrap();
+        assert_eq!(f32::from_le_bytes(b4), 12.25);
+        server.map().get(REG_GOAL_CURRENT as u16, &mut b4).unwrap();
+        assert_eq!(f32::from_le_bytes(b4), 2.5);
+    }
 }

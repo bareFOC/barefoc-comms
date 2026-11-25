@@ -16,8 +16,8 @@
 //! ```text
 //! write_register:  I2C  [START][addr+W][reg_hi][reg_lo][d0..dn][STOP]
 //!                  SPI  [CS↓ reg_hi reg_lo][CS↑ payload]  (one transaction)
-//! read_register:   I2C  [START][addr+W][reg_hi][reg_lo][STOP]  (pointer latch)
-//!                       [START][addr+R][b0..b(len-1)][STOP]; little-endian stream
+//! read_register:   I2C  [START][addr+W][reg_hi][reg_lo][ReSTART][addr+R][b0..b(len-1)][STOP]
+//!                       (single combined `write_read` repeated-START; little-endian stream)
 //!                  SPI  [CS↓ reg_hi reg_lo][CS↑]          (pointer latch frame)
 //!                       [CS↓ clock-in len bytes][CS↑]     (reply-in-next-CS-frame,
 //!                                                          TMC-style per design)
@@ -59,12 +59,13 @@ pub enum ClientError<E> {
 /// Generic over `embedded_hal::i2c::I2c` (default `SevenBitAddress` addressing).
 /// Because `I2c::write` requires one contiguous frame, the two-byte pointer and
 /// payload are staged in an internal fixed-size frame buffer (`TX_BUF`, default
-/// `8`, which comfortably holds the pointer plus a 4-byte LE `f32` register);
+/// `32`, which holds up to 30 payload bytes including the 16-byte/20-byte
+/// command block and 12-byte UID);
 /// payloads larger than `TX_BUF - 2` are reported as [`ClientError::TxFrameTooLarge`].
 ///
 /// Upstream Reference: `ref/Miniata/firmware/src/comm_i2c.cpp` (register-pointer
 /// idiom; the `0xFF` burst protocol is intentionally not ported — design D3).
-pub struct RegClientI2c<B, const TX_BUF: usize = 8> {
+pub struct RegClientI2c<B, const TX_BUF: usize = 32> {
     bus: B,
 }
 
@@ -95,10 +96,11 @@ impl<B: I2c, const TX_BUF: usize> RegClientI2c<B, TX_BUF> {
             .map_err(ClientError::Bus)
     }
 
-    /// Latches the register pointer with a `[reg_hi, reg_lo]` write transaction,
-    /// then reads exactly `len` little-endian bytes into `out` in a separate read
-    /// transaction (`out.len() >= len`). Auto-increment on the server streams across
-    /// register boundaries; little-endian float bytes are returned verbatim.
+    /// Latches the register pointer and reads exactly `len` little-endian bytes
+    /// into `out` in a single combined repeated-START transaction via
+    /// [`I2c::write_read`] (`out.len() >= len`). Auto-increment on the server
+    /// streams across register boundaries; little-endian float bytes are
+    /// returned verbatim.
     pub fn read_register(
         &mut self,
         addr: u8,
@@ -110,9 +112,8 @@ impl<B: I2c, const TX_BUF: usize> RegClientI2c<B, TX_BUF> {
             return Err(ClientError::RxBufferTooSmall);
         }
         let pointer = [(reg >> 8) as u8, reg as u8];
-        self.bus.write(addr, &pointer).map_err(ClientError::Bus)?;
         self.bus
-            .read(addr, &mut out[..len])
+            .write_read(addr, &pointer, &mut out[..len])
             .map_err(ClientError::Bus)
     }
 }
@@ -362,11 +363,10 @@ mod tests {
     #[test]
     fn i2c_wire_bytes_pointer_write_then_burst_read() {
         // Client write_register: single write transaction [reg][payload].
-        // Client read_register: [reg] latch write, then 4 LE bytes (12.5) streamed.
+        // Client read_register: single combined write_read [reg] -> 4 LE bytes (12.5).
         let expectations = [
             I2cTx::write(DEV, vec![0x00, 0x14, 0, 0, 0x48, 0x41]), // WRITE: pointer + payload (12.5 LE)
-            I2cTx::write(DEV, vec![0x00, 0x14]),                   // READ: pointer latch
-            I2cTx::read(DEV, vec![0, 0, 0x48, 0x41]),        // READ: 4 LE bytes = 12.5
+            I2cTx::write_read(DEV, vec![0x00, 0x14], vec![0, 0, 0x48, 0x41]), // READ: write_read 4 LE bytes = 12.5
         ];
         let mut bus = I2cMock::new(&expectations);
         {
