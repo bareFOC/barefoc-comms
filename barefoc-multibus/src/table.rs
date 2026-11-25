@@ -268,6 +268,19 @@ impl<C, const CAP: usize, const MAX_ENTRIES: usize> RegMap<C, CAP, MAX_ENTRIES> 
         Ok(())
     }
 
+    /// Replace the write hook of an already-registered entry starting at `offset`.
+    pub fn set_write_hook(&mut self, offset: u16, hook: WriteHookFn<C>) -> Result<(), Error> {
+        for slot in &mut self.entries[..self.entry_count] {
+            if let Some(entry) = slot {
+                if entry.offset == offset {
+                    entry.hook = Some(hook);
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::Unmapped)
+    }
+
     /// Declared map extent in bytes.
     pub fn extent(&self) -> usize {
         self.extent

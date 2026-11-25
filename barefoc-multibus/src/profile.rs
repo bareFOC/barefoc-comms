@@ -11,14 +11,23 @@ use barefoc_drivers::comms::RegisterBridge;
 
 use crate::table::{HookResult, RegEntry, RegMap};
 
-/// Universal register offset for the multi-motor selector (0x70).
-pub const REG_MOTOR_SELECT: u16 = 0x70;
+/// Universal register offset for the multi-motor selector (`MotorSelect`, 4-byte aligned).
+pub const REG_MOTOR_SELECT: u16 = RegisterId::MotorSelect.aligned_offset();
 
-/// Universal register offset for SaveConfig command trigger (0x64).
-pub const REG_SAVE_CONFIG: u16 = 0x64;
+/// Universal register offset for `CalibCommand` (4-byte aligned).
+pub const REG_CALIB_CMD: u16 = RegisterId::CalibCommand.aligned_offset();
 
-/// Universal register offset for TopologyMode selection (0x78).
-pub const REG_TOPOLOGY_MODE: u16 = 0x78;
+/// Universal register offset for SaveConfig command trigger (non-overlapping, 4-byte aligned).
+pub const REG_SAVE_CONFIG: u16 = RegisterId::ALIGNED_SPAN;
+
+/// Universal register offset for TopologyMode selection (non-overlapping, 4-byte aligned).
+pub const REG_TOPOLOGY_MODE: u16 = RegisterId::ALIGNED_SPAN + 4;
+
+/// Return the 4-byte-aligned, non-overlapping byte offset for `id`.
+#[inline]
+pub const fn reg_offset(id: RegisterId) -> u16 {
+    id.aligned_offset()
+}
 
 /// Generic write hook for a SimpleFOC register. Deserializes the bank bytes into a
 /// [`RegisterValue`], calls [`RegisterBridge::write_reg`], and returns
@@ -26,9 +35,9 @@ pub const REG_TOPOLOGY_MODE: u16 = 0x78;
 /// silently skipped (the bank still holds the bytes so read-back returns what the
 /// host sent).
 fn sf_hook<B: RegisterBridge>(ctx: &mut B, offset: u16, bytes: &[u8]) -> HookResult {
-    let id = match RegisterId::try_from(offset as u8) {
-        Ok(id) => id,
-        Err(_) => return HookResult::Applied,
+    let id = match RegisterId::from_aligned_offset(offset) {
+        Some(id) => id,
+        None => return HookResult::Applied,
     };
     let value = match RegisterValue::from_bytes(id, bytes) {
         Ok(v) => v,
@@ -38,7 +47,7 @@ fn sf_hook<B: RegisterBridge>(ctx: &mut B, offset: u16, bytes: &[u8]) -> HookRes
     HookResult::Applied
 }
 
-/// Generic write hook for `REG_SAVE_CONFIG` (0x64).
+/// Generic write hook for `REG_SAVE_CONFIG`.
 pub fn save_config_hook<B: RegisterBridge>(
     _ctx: &mut B,
     _offset: u16,
@@ -48,30 +57,31 @@ pub fn save_config_hook<B: RegisterBridge>(
 }
 
 /// Auto-generate a [`RegMap`] from a [`RegisterBridge`] implementation.
+///
+/// All registers are placed on strict 4-byte-aligned, non-overlapping boundaries.
+/// Panics if any register fails registration.
 pub fn simplefoc_profile<B: RegisterBridge>(
     bridge: B,
-) -> RegMap<B, 384, 128> {
+) -> RegMap<B, 640, 160> {
     let mut map = RegMap::new(bridge);
     for id in RegisterId::ALL {
         if id == RegisterId::Position {
             continue;
         }
-        let offset = id as u16;
+        let offset = id.aligned_offset();
         let width = id.expected_size() as u8;
-        if offset == REG_SAVE_CONFIG {
-            let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
-            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
-        } else if id.is_read_only() {
-            let _ = map.add_register(RegEntry::ro(offset, width));
+        if id.is_read_only() {
+            map.add_register(RegEntry::ro(offset, width))
+                .expect("simplefoc_profile RO register overlap or capacity exceeded");
         } else {
             let hook: crate::table::WriteHookFn<B> = sf_hook::<B>;
-            let _ = map.add_register(RegEntry::rw_hooked(offset, width, hook));
+            map.add_register(RegEntry::rw_hooked(offset, width, hook))
+                .expect("simplefoc_profile RW register overlap or capacity exceeded");
         }
     }
-    if map.get(REG_SAVE_CONFIG, &mut [0u8; 1]).is_err() {
-        let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
-        let _ = map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook));
-    }
+    let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
+    map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook))
+        .expect("simplefoc_profile REG_SAVE_CONFIG registration failed");
     map
 }
 
@@ -121,16 +131,16 @@ impl<const N: usize, B: RegisterBridge> MultiMotorState<N, B> {
     }
 }
 
-/// Write hook for motor window registers (`0x00..=0x6C`).
+/// Write hook for motor window registers (`RegisterId <= 0x6C`).
 /// Dispatches `write_reg` to `ctx.motors[ctx.selected]`.
 fn multi_motor_sf_hook<const N: usize, B: RegisterBridge>(
     ctx: &mut MultiMotorState<N, B>,
     offset: u16,
     bytes: &[u8],
 ) -> HookResult {
-    let id = match RegisterId::try_from(offset as u8) {
-        Ok(id) => id,
-        Err(_) => return HookResult::Applied,
+    let id = match RegisterId::from_aligned_offset(offset) {
+        Some(id) => id,
+        None => return HookResult::Applied,
     };
     let value = match RegisterValue::from_bytes(id, bytes) {
         Ok(v) => v,
@@ -143,7 +153,7 @@ fn multi_motor_sf_hook<const N: usize, B: RegisterBridge>(
     HookResult::Applied
 }
 
-/// Write hook for `MotorSelect` (`0x70`).
+/// Write hook for `MotorSelect` (`REG_MOTOR_SELECT`).
 /// Updates `ctx.selected` if index < N; otherwise self-clears to 0.
 fn motor_select_hook<const N: usize, B: RegisterBridge>(
     ctx: &mut MultiMotorState<N, B>,
@@ -160,16 +170,16 @@ fn motor_select_hook<const N: usize, B: RegisterBridge>(
     }
 }
 
-/// Write hook for board and kinematics registers (`0x71..=0xBF`).
+/// Write hook for board and kinematics registers (`RegisterId > 0x6C`).
 /// Dispatches `write_reg` to global state (`ctx.motors[0]`).
 fn multi_global_sf_hook<const N: usize, B: RegisterBridge>(
     ctx: &mut MultiMotorState<N, B>,
     offset: u16,
     bytes: &[u8],
 ) -> HookResult {
-    let id = match RegisterId::try_from(offset as u8) {
-        Ok(id) => id,
-        Err(_) => return HookResult::Applied,
+    let id = match RegisterId::from_aligned_offset(offset) {
+        Some(id) => id,
+        None => return HookResult::Applied,
     };
     let value = match RegisterValue::from_bytes(id, bytes) {
         Ok(v) => v,
@@ -199,79 +209,64 @@ pub fn topology_mode_hook<const N: usize, B: RegisterBridge>(
     HookResult::Applied
 }
 
-/// Register a custom save configuration hook on register `0x64`.
+/// Register a custom save configuration hook on `REG_SAVE_CONFIG`.
 pub fn register_save_config_hook<CTX, const CAP: usize, const MAX: usize>(
     map: &mut RegMap<CTX, CAP, MAX>,
     hook: crate::table::WriteHookFn<CTX>,
 ) -> Result<(), crate::table::Error> {
-    map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook))
+    map.set_write_hook(REG_SAVE_CONFIG, hook)
 }
 
-/// Register a custom topology mode hook on register `0x78`.
+/// Register a custom topology mode hook on `REG_TOPOLOGY_MODE`.
 pub fn register_topology_mode_hook<CTX, const CAP: usize, const MAX: usize>(
     map: &mut RegMap<CTX, CAP, MAX>,
     hook: crate::table::WriteHookFn<CTX>,
 ) -> Result<(), crate::table::Error> {
-    map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, hook))
+    map.set_write_hook(REG_TOPOLOGY_MODE, hook)
 }
 
 /// Auto-generate a [`RegMap`] for an N-motor system from an array of [`RegisterBridge`] instances.
 ///
-/// Registers the motor window (`0x00..=0x6C`) routing to the currently selected motor,
-/// `MotorSelect` (`0x70`) gating selector updates with bounds checking,
-/// `SaveConfig` (`0x64`) for non-volatile persistence triggers,
-/// `TopologyMode` (`0x78`) for dynamic kinematic topology reconfiguration,
-/// and board/kinematics descriptors (`0x71..=0xBF`) routing to global state.
+/// Registers are placed on strict 4-byte-aligned, non-overlapping boundaries.
+/// Panics if any register fails registration (zero silent drops).
 pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
     motors: [B; N],
-) -> RegMap<MultiMotorState<N, B>, 384, 128> {
+) -> RegMap<MultiMotorState<N, B>, 640, 160> {
     let mut map = RegMap::new(MultiMotorState::new(motors));
     for id in RegisterId::ALL {
         if id == RegisterId::Position {
             continue;
         }
-        let offset = id as u16;
+        let offset = id.aligned_offset();
         let width = id.expected_size() as u8;
         if offset == REG_MOTOR_SELECT {
             let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = motor_select_hook::<N, B>;
-            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
-        } else if offset == REG_SAVE_CONFIG {
-            let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_motor_save_config_hook::<N, B>;
-            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
-        } else if offset == REG_TOPOLOGY_MODE {
-            let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
-            let _ = map.add_register(RegEntry::rw_hooked(offset, 1, hook));
-        } else if offset <= 0x6C {
+            map.add_register(RegEntry::rw_hooked(offset, 1, hook))
+                .expect("multi_motor_profile REG_MOTOR_SELECT registration failed");
+        } else if (id as u8) <= 0x6C {
             if id.is_read_only() {
-                let _ = map.add_register(RegEntry::ro(offset, width));
+                map.add_register(RegEntry::ro(offset, width))
+                    .expect("multi_motor_profile motor RO register overlap or capacity exceeded");
             } else {
                 let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_motor_sf_hook::<N, B>;
-                let _ = map.add_register(RegEntry::rw_hooked(offset, width, hook));
+                map.add_register(RegEntry::rw_hooked(offset, width, hook))
+                    .expect("multi_motor_profile motor RW register overlap or capacity exceeded");
             }
+        } else if id.is_read_only() {
+            map.add_register(RegEntry::ro(offset, width))
+                .expect("multi_motor_profile global RO register overlap or capacity exceeded");
         } else {
-            if id.is_read_only() {
-                let _ = map.add_register(RegEntry::ro(offset, width));
-            } else {
-                let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_global_sf_hook::<N, B>;
-                let _ = map.add_register(RegEntry::rw_hooked(offset, width, hook));
-            }
+            let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_global_sf_hook::<N, B>;
+            map.add_register(RegEntry::rw_hooked(offset, width, hook))
+                .expect("multi_motor_profile global RW register overlap or capacity exceeded");
         }
     }
-    // Ensure REG_MOTOR_SELECT (0x70) is registered
-    if map.get(REG_MOTOR_SELECT, &mut [0u8; 1]).is_err() {
-        let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = motor_select_hook::<N, B>;
-        let _ = map.add_register(RegEntry::rw_hooked(REG_MOTOR_SELECT, 1, hook));
-    }
-    // Ensure REG_SAVE_CONFIG (0x64) is registered
-    if map.get(REG_SAVE_CONFIG, &mut [0u8; 1]).is_err() {
-        let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_motor_save_config_hook::<N, B>;
-        let _ = map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook));
-    }
-    // Ensure REG_TOPOLOGY_MODE (0x78) is registered
-    if map.get(REG_TOPOLOGY_MODE, &mut [0u8; 1]).is_err() {
-        let hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
-        let _ = map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, hook));
-    }
+    let save_hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = multi_motor_save_config_hook::<N, B>;
+    map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, save_hook))
+        .expect("multi_motor_profile REG_SAVE_CONFIG registration failed");
+    let topo_hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
+    map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, topo_hook))
+        .expect("multi_motor_profile REG_TOPOLOGY_MODE registration failed");
     map
 }
 
@@ -281,7 +276,7 @@ pub fn refresh_telemetry<B: RegisterBridge, const CAP: usize, const MAX: usize>(
 ) {
     for id in RegisterId::ALL {
         if id.is_read_only() {
-            let offset = id as u16;
+            let offset = id.aligned_offset();
             let width = id.expected_size();
             if let Ok(val) = map.handler().read_reg(id) {
                 let mut buf = [0u8; 12];
@@ -296,7 +291,7 @@ pub fn refresh_telemetry<B: RegisterBridge, const CAP: usize, const MAX: usize>(
 /// Refresh all read-only register bytes in the bank from the currently selected motor.
 ///
 /// Motor-window read-only registers are queried from `motors[selected]`.
-/// Board and kinematics read-only registers (0x71..=0xBF) are queried from global state (`motors[0]`).
+/// Board and kinematics read-only registers (`RegisterId > 0x6C`) are queried from global state (`motors[0]`).
 pub fn refresh_telemetry_multi<const N: usize, B: RegisterBridge, const CAP: usize, const MAX: usize>(
     map: &mut RegMap<MultiMotorState<N, B>, CAP, MAX>,
 ) {
@@ -305,10 +300,10 @@ pub fn refresh_telemetry_multi<const N: usize, B: RegisterBridge, const CAP: usi
         return;
     }
     for id in RegisterId::ALL {
-        let offset = id as u16;
+        let offset = id.aligned_offset();
         if id.is_read_only() && offset != REG_MOTOR_SELECT {
             let width = id.expected_size();
-            let res = if offset <= 0x6C {
+            let res = if (id as u8) <= 0x6C {
                 map.handler().motors[selected].read_reg(id)
             } else {
                 map.handler().motors[0].read_reg(id)
@@ -411,12 +406,13 @@ mod tests {
 
         let val: f32 = 12.5;
         let bytes = val.to_le_bytes();
+        let off = reg_offset(RegisterId::VoltageLimit).to_be_bytes();
         let mut phase = [0u8; 6];
-        phase[0] = 0x00; phase[1] = 0x50; // VoltageLimit
+        phase[0] = off[0]; phase[1] = off[1];
         phase[2..].copy_from_slice(&bytes);
         map.write_phase(&phase).unwrap();
 
-        map.write_phase(&[0x00, 0x50]).unwrap();
+        map.write_phase(&off).unwrap();
         let mut out = [0u8; 4];
         let n = map.read_phase(4, &mut out).unwrap();
         assert_eq!(n, 4);
@@ -450,29 +446,32 @@ mod tests {
 
         // Default selected is 0: write target and gain to motor 0
         let target0 = 5.0f32;
+        let target_off = reg_offset(RegisterId::Target).to_be_bytes();
         let mut phase = [0u8; 6];
-        phase[0] = 0x00; phase[1] = 0x01; // Target
+        phase[0] = target_off[0]; phase[1] = target_off[1];
         phase[2..].copy_from_slice(&target0.to_le_bytes());
         map.write_phase(&phase).unwrap();
 
         let gain0 = 1.25f32;
+        let vel_p_off = reg_offset(RegisterId::VelPidP).to_be_bytes();
         let mut phase_gain = [0u8; 6];
-        phase_gain[0] = 0x00; phase_gain[1] = 0x30; // VelPidP
+        phase_gain[0] = vel_p_off[0]; phase_gain[1] = vel_p_off[1];
         phase_gain[2..].copy_from_slice(&gain0.to_le_bytes());
         map.write_phase(&phase_gain).unwrap();
 
-        // Select motor 1: write 1 to MotorSelect (0x70)
-        map.write_phase(&[0x00, 0x70, 0x01]).unwrap();
+        // Select motor 1: write 1 to MotorSelect
+        let sel_off = REG_MOTOR_SELECT.to_be_bytes();
+        map.write_phase(&[sel_off[0], sel_off[1], 0x01]).unwrap();
         assert_eq!(map.handler().selected(), 1);
 
         // Write target and gain to motor 1
         let target1 = 10.0f32;
-        phase[0] = 0x00; phase[1] = 0x01;
+        phase[0] = target_off[0]; phase[1] = target_off[1];
         phase[2..].copy_from_slice(&target1.to_le_bytes());
         map.write_phase(&phase).unwrap();
 
         let gain1 = 3.5f32;
-        phase_gain[0] = 0x00; phase_gain[1] = 0x30;
+        phase_gain[0] = vel_p_off[0]; phase_gain[1] = vel_p_off[1];
         phase_gain[2..].copy_from_slice(&gain1.to_le_bytes());
         map.write_phase(&phase_gain).unwrap();
 
@@ -490,18 +489,19 @@ mod tests {
         let config1 = MotorConfig::new(&clock);
         let mut map = multi_motor_profile([config0, config1]);
 
+        let sel_off = REG_MOTOR_SELECT.to_be_bytes();
         // Select motor 1 (valid)
-        map.write_phase(&[0x00, 0x70, 0x01]).unwrap();
+        map.write_phase(&[sel_off[0], sel_off[1], 0x01]).unwrap();
         assert_eq!(map.handler().selected(), 1);
 
         // Write out-of-range selector (2 for N=2)
-        map.write_phase(&[0x00, 0x70, 0x02]).unwrap();
+        map.write_phase(&[sel_off[0], sel_off[1], 0x02]).unwrap();
         // State remains 1 (no state change to selected)
         assert_eq!(map.handler().selected(), 1);
 
-        // Bank at 0x70 self-cleared
+        // Bank at REG_MOTOR_SELECT self-cleared
         let mut sel_byte = [0u8; 1];
-        let _ = map.get(0x70, &mut sel_byte);
+        let _ = map.get(REG_MOTOR_SELECT, &mut sel_byte);
         assert_eq!(sel_byte[0], 0);
     }
 
@@ -516,29 +516,32 @@ mod tests {
         config1.shaft_velocity = 4.5;
 
         let mut map = multi_motor_profile([config0, config1]);
+        let angle_off = reg_offset(RegisterId::Angle).to_be_bytes();
+        let vel_off = reg_offset(RegisterId::Velocity).to_be_bytes();
+        let sel_off = REG_MOTOR_SELECT.to_be_bytes();
 
         // Default selected is 0
         refresh_telemetry_multi(&mut map);
 
-        map.write_phase(&[0x00, 0x09]).unwrap();
+        map.write_phase(&angle_off).unwrap();
         let mut angle_bytes = [0u8; 4];
         map.read_phase(4, &mut angle_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(angle_bytes), 1.5);
 
-        map.write_phase(&[0x00, 0x11]).unwrap();
+        map.write_phase(&vel_off).unwrap();
         let mut vel_bytes = [0u8; 4];
         map.read_phase(4, &mut vel_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(vel_bytes), 2.5);
 
         // Switch to motor 1
-        map.write_phase(&[0x00, 0x70, 0x01]).unwrap();
+        map.write_phase(&[sel_off[0], sel_off[1], 0x01]).unwrap();
         refresh_telemetry_multi(&mut map);
 
-        map.write_phase(&[0x00, 0x09]).unwrap();
+        map.write_phase(&angle_off).unwrap();
         map.read_phase(4, &mut angle_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(angle_bytes), 3.5);
 
-        map.write_phase(&[0x00, 0x11]).unwrap();
+        map.write_phase(&vel_off).unwrap();
         map.read_phase(4, &mut vel_bytes).unwrap();
         assert_eq!(f32::from_le_bytes(vel_bytes), 4.5);
     }
@@ -555,6 +558,8 @@ mod tests {
 
         let map = multi_motor_profile([config0, config1]);
         let mut server = RegServer::new(map);
+        let angle_off = reg_offset(RegisterId::Angle);
+        let vel_off = reg_offset(RegisterId::Velocity);
 
         {
             let mut bus = FakeI2cBus {
@@ -563,7 +568,7 @@ mod tests {
             let mut client = RegClientI2c::<_, 8>::new(&mut bus);
 
             // 1. Read motor 0 telemetry over I2C
-            client.write_register(DEV, 0x70, &[0]).unwrap();
+            client.write_register(DEV, REG_MOTOR_SELECT, &[0]).unwrap();
         }
         refresh_telemetry_multi(server.map_mut());
         {
@@ -574,16 +579,16 @@ mod tests {
             let mut angle_buf = [0u8; 4];
             let mut vel_buf = [0u8; 4];
             client
-                .read_register(DEV, 0x09, 4, &mut angle_buf)
+                .read_register(DEV, angle_off, 4, &mut angle_buf)
                 .unwrap();
             client
-                .read_register(DEV, 0x11, 4, &mut vel_buf)
+                .read_register(DEV, vel_off, 4, &mut vel_buf)
                 .unwrap();
             assert_eq!(f32::from_le_bytes(angle_buf), 1.23);
             assert_eq!(f32::from_le_bytes(vel_buf), 4.56);
 
             // 2. Select motor 1 over I2C
-            client.write_register(DEV, 0x70, &[1]).unwrap();
+            client.write_register(DEV, REG_MOTOR_SELECT, &[1]).unwrap();
         }
         refresh_telemetry_multi(server.map_mut());
         {
@@ -594,10 +599,10 @@ mod tests {
             let mut angle_buf = [0u8; 4];
             let mut vel_buf = [0u8; 4];
             client
-                .read_register(DEV, 0x09, 4, &mut angle_buf)
+                .read_register(DEV, angle_off, 4, &mut angle_buf)
                 .unwrap();
             client
-                .read_register(DEV, 0x11, 4, &mut vel_buf)
+                .read_register(DEV, vel_off, 4, &mut vel_buf)
                 .unwrap();
             assert_eq!(f32::from_le_bytes(angle_buf), 7.89);
             assert_eq!(f32::from_le_bytes(vel_buf), 0.12);
@@ -608,18 +613,20 @@ mod tests {
     fn multi_motor_scripted_mock_i2c_wire_transactions() {
         let angle0 = 1.23f32.to_le_bytes();
         let angle1 = 7.89f32.to_le_bytes();
+        let sel_be = REG_MOTOR_SELECT.to_be_bytes();
+        let angle_be = reg_offset(RegisterId::Angle).to_be_bytes();
 
         let expectations = [
             // Select motor 0
-            I2cTx::write(DEV, vec![0x00, 0x70, 0]),
-            // Pointer latch Angle (0x09)
-            I2cTx::write(DEV, vec![0x00, 0x09]),
+            I2cTx::write(DEV, vec![sel_be[0], sel_be[1], 0]),
+            // Pointer latch Angle
+            I2cTx::write(DEV, vec![angle_be[0], angle_be[1]]),
             // Read 4 bytes angle0
             I2cTx::read(DEV, angle0.to_vec()),
             // Select motor 1
-            I2cTx::write(DEV, vec![0x00, 0x70, 1]),
-            // Pointer latch Angle (0x09)
-            I2cTx::write(DEV, vec![0x00, 0x09]),
+            I2cTx::write(DEV, vec![sel_be[0], sel_be[1], 1]),
+            // Pointer latch Angle
+            I2cTx::write(DEV, vec![angle_be[0], angle_be[1]]),
             // Read 4 bytes angle1
             I2cTx::read(DEV, angle1.to_vec()),
         ];
@@ -629,12 +636,12 @@ mod tests {
             let mut client = RegClientI2c::<_, 8>::new(&mut mock_bus);
             let mut buf = [0u8; 4];
 
-            client.write_register(DEV, 0x70, &[0]).unwrap();
-            client.read_register(DEV, 0x09, 4, &mut buf).unwrap();
+            client.write_register(DEV, REG_MOTOR_SELECT, &[0]).unwrap();
+            client.read_register(DEV, reg_offset(RegisterId::Angle), 4, &mut buf).unwrap();
             assert_eq!(f32::from_le_bytes(buf), 1.23);
 
-            client.write_register(DEV, 0x70, &[1]).unwrap();
-            client.read_register(DEV, 0x09, 4, &mut buf).unwrap();
+            client.write_register(DEV, REG_MOTOR_SELECT, &[1]).unwrap();
+            client.read_register(DEV, reg_offset(RegisterId::Angle), 4, &mut buf).unwrap();
             assert_eq!(f32::from_le_bytes(buf), 7.89);
         }
         mock_bus.done();
@@ -658,10 +665,125 @@ mod tests {
         client.read_register(DEV, REG_SAVE_CONFIG, 1, &mut save_val).unwrap();
         assert_eq!(save_val[0], 0x55);
 
-        // Write 0x02 (Topology Mode) to 0x78
+        // Write 0x02 (Topology Mode) to REG_TOPOLOGY_MODE
         client.write_register(DEV, REG_TOPOLOGY_MODE, &[0x02]).unwrap();
         let mut topo_val = [0u8; 1];
         client.read_register(DEV, REG_TOPOLOGY_MODE, 1, &mut topo_val).unwrap();
         assert_eq!(topo_val[0], 0x02);
+    }
+
+    #[test]
+    fn test_aligned_layout_and_safety_tuning_roundtrip() {
+        // Verify every RegisterId has a 4-byte aligned offset and zero overlaps.
+        for id in RegisterId::ALL {
+            let off = reg_offset(id);
+            assert_eq!(off % 4, 0, "Register {id:?} offset {off:#x} is not 4-byte aligned");
+            assert_eq!(RegisterId::from_aligned_offset(off), Some(id));
+        }
+
+        #[derive(Default)]
+        struct SafetyMockBridge {
+            voltage_limit: f32,
+            current_limit: f32,
+            vel_p: f32,
+            control_mode: u8,
+            min_pos: f32,
+            max_pos: f32,
+            stall_timeout_ms: u32,
+            calib_cmd: u8,
+            hw_err: u16,
+            bus_v: f32,
+            temp_c: f32,
+        }
+
+        impl RegisterBridge for SafetyMockBridge {
+            fn read_reg(&self, id: RegisterId) -> Result<RegisterValue, barefoc_drivers::comms::registers::RegisterError> {
+                match id {
+                    RegisterId::VoltageLimit => Ok(RegisterValue::Float(self.voltage_limit)),
+                    RegisterId::CurrentLimit => Ok(RegisterValue::Float(self.current_limit)),
+                    RegisterId::VelPidP => Ok(RegisterValue::Float(self.vel_p)),
+                    RegisterId::ControlMode => Ok(RegisterValue::U8(self.control_mode)),
+                    RegisterId::MinPositionLimit => Ok(RegisterValue::Float(self.min_pos)),
+                    RegisterId::MaxPositionLimit => Ok(RegisterValue::Float(self.max_pos)),
+                    RegisterId::StallTimeoutMs => Ok(RegisterValue::U32(self.stall_timeout_ms)),
+                    RegisterId::CalibCommand => Ok(RegisterValue::U8(self.calib_cmd)),
+                    RegisterId::HardwareErrorStatus => Ok(RegisterValue::U16(self.hw_err)),
+                    RegisterId::PresentBusVoltage => Ok(RegisterValue::Float(self.bus_v)),
+                    RegisterId::PresentTemperature => Ok(RegisterValue::Float(self.temp_c)),
+                    _ => Err(barefoc_drivers::comms::registers::RegisterError::UnknownRegister(id as u8)),
+                }
+            }
+
+            fn write_reg(&mut self, id: RegisterId, value: RegisterValue) -> Result<(), barefoc_drivers::comms::registers::RegisterError> {
+                match (id, value) {
+                    (RegisterId::VoltageLimit, RegisterValue::Float(v)) => self.voltage_limit = v,
+                    (RegisterId::CurrentLimit, RegisterValue::Float(v)) => self.current_limit = v,
+                    (RegisterId::VelPidP, RegisterValue::Float(v)) => self.vel_p = v,
+                    (RegisterId::ControlMode, RegisterValue::U8(v)) => self.control_mode = v,
+                    (RegisterId::MinPositionLimit, RegisterValue::Float(v)) => self.min_pos = v,
+                    (RegisterId::MaxPositionLimit, RegisterValue::Float(v)) => self.max_pos = v,
+                    (RegisterId::StallTimeoutMs, RegisterValue::U32(v)) => self.stall_timeout_ms = v,
+                    (RegisterId::CalibCommand, RegisterValue::U8(v)) => self.calib_cmd = v,
+                    _ => return Err(barefoc_drivers::comms::registers::RegisterError::UnknownRegister(id as u8)),
+                }
+                Ok(())
+            }
+        }
+
+        let b0 = SafetyMockBridge {
+            hw_err: 0x0804,
+            bus_v: 11.8,
+            temp_c: 42.5,
+            ..Default::default()
+        };
+        let b1 = SafetyMockBridge::default();
+
+        let mut server = RegServer::new(multi_motor_profile([b0, b1]));
+        refresh_telemetry_multi(server.map_mut());
+
+        let mut bus = FakeI2cBus {
+            server: &mut server,
+        };
+        let mut client = RegClientI2c::<_, 16>::new(&mut bus);
+
+        // Write R/W safety & tuning registers over I2C
+        client.write_register(DEV, reg_offset(RegisterId::VoltageLimit), &9.5f32.to_le_bytes()).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::CurrentLimit), &1.8f32.to_le_bytes()).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::VelPidP), &0.45f32.to_le_bytes()).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::ControlMode), &[2]).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::MinPositionLimit), &(-1.25f32).to_le_bytes()).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::MaxPositionLimit), &1.75f32.to_le_bytes()).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::StallTimeoutMs), &250u32.to_le_bytes()).unwrap();
+        client.write_register(DEV, REG_CALIB_CMD, &[1]).unwrap();
+
+        // Read back all written values
+        let mut buf4 = [0u8; 4];
+        let mut buf2 = [0u8; 2];
+        let mut buf1 = [0u8; 1];
+
+        client.read_register(DEV, reg_offset(RegisterId::VoltageLimit), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), 9.5);
+        client.read_register(DEV, reg_offset(RegisterId::CurrentLimit), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), 1.8);
+        client.read_register(DEV, reg_offset(RegisterId::VelPidP), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), 0.45);
+        client.read_register(DEV, reg_offset(RegisterId::ControlMode), 1, &mut buf1).unwrap();
+        assert_eq!(buf1[0], 2);
+        client.read_register(DEV, reg_offset(RegisterId::MinPositionLimit), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), -1.25);
+        client.read_register(DEV, reg_offset(RegisterId::MaxPositionLimit), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), 1.75);
+        client.read_register(DEV, reg_offset(RegisterId::StallTimeoutMs), 4, &mut buf4).unwrap();
+        assert_eq!(u32::from_le_bytes(buf4), 250);
+        client.read_register(DEV, REG_CALIB_CMD, 1, &mut buf1).unwrap();
+        assert_eq!(buf1[0], 1);
+
+        // Read RO telemetry registers
+        client.read_register(DEV, reg_offset(RegisterId::HardwareErrorStatus), 2, &mut buf2).unwrap();
+        assert_eq!(u16::from_le_bytes(buf2), 0x0804);
+        client.read_register(DEV, reg_offset(RegisterId::PresentBusVoltage), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), 11.8);
+        client.read_register(DEV, reg_offset(RegisterId::PresentTemperature), 4, &mut buf4).unwrap();
+        assert_eq!(f32::from_le_bytes(buf4), 42.5);
     }
 }
