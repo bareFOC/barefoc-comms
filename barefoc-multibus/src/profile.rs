@@ -785,5 +785,22 @@ mod tests {
         assert_eq!(f32::from_le_bytes(buf4), 11.8);
         client.read_register(DEV, reg_offset(RegisterId::PresentTemperature), 4, &mut buf4).unwrap();
         assert_eq!(f32::from_le_bytes(buf4), 42.5);
+
+        // Runtime sensor & bus configuration registers (R/W) and SensorFaultStatus (RO)
+        client.write_register(DEV, reg_offset(RegisterId::SensorBusFreqHz), &400_000u32.to_le_bytes()).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::SensorRange), &[0]).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::SensorAveraging), &[3]).unwrap();
+        client.write_register(DEV, reg_offset(RegisterId::SensorCrcEnable), &[1]).unwrap();
+
+        client.read_register(DEV, reg_offset(RegisterId::SensorBusFreqHz), 4, &mut buf4).unwrap();
+        assert_eq!(u32::from_le_bytes(buf4), 400_000);
+        client.read_register(DEV, reg_offset(RegisterId::SensorRange), 1, &mut buf1).unwrap();
+        assert_eq!(buf1[0], 0);
+        client.read_register(DEV, reg_offset(RegisterId::SensorAveraging), 1, &mut buf1).unwrap();
+        assert_eq!(buf1[0], 3);
+        client.read_register(DEV, reg_offset(RegisterId::SensorCrcEnable), 1, &mut buf1).unwrap();
+        assert_eq!(buf1[0], 1);
+
+        assert!(client.write_register(DEV, reg_offset(RegisterId::SensorFaultStatus), &[1]).is_err());
     }
 }
