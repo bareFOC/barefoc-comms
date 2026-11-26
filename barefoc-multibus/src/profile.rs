@@ -23,6 +23,9 @@ pub const REG_SAVE_CONFIG: u16 = RegisterId::ALIGNED_SPAN;
 /// Universal register offset for TopologyMode selection (non-overlapping, 4-byte aligned).
 pub const REG_TOPOLOGY_MODE: u16 = RegisterId::ALIGNED_SPAN + 4;
 
+/// Universal register offset for 4-channel SensorMap `[u8; 4]` (non-overlapping, 4-byte aligned).
+pub const REG_SENSOR_MAP: u16 = RegisterId::ALIGNED_SPAN + 8;
+
 /// Return the 4-byte-aligned, non-overlapping byte offset for `id`.
 #[inline]
 pub const fn reg_offset(id: RegisterId) -> u16 {
@@ -216,6 +219,15 @@ pub fn topology_mode_hook<const N: usize, B: RegisterBridge>(
     HookResult::Applied
 }
 
+/// Write hook for `REG_SENSOR_MAP` in multi-motor profiles.
+pub fn sensor_map_hook<const N: usize, B: RegisterBridge>(
+    _ctx: &mut MultiMotorState<N, B>,
+    _offset: u16,
+    _bytes: &[u8],
+) -> HookResult {
+    HookResult::Applied
+}
+
 /// Register a custom save configuration hook on `REG_SAVE_CONFIG`.
 pub fn register_save_config_hook<CTX, const CAP: usize, const MAX: usize>(
     map: &mut RegMap<CTX, CAP, MAX>,
@@ -230,6 +242,14 @@ pub fn register_topology_mode_hook<CTX, const CAP: usize, const MAX: usize>(
     hook: crate::table::WriteHookFn<CTX>,
 ) -> Result<(), crate::table::Error> {
     map.set_write_hook(REG_TOPOLOGY_MODE, hook)
+}
+
+/// Register a custom sensor map hook on `REG_SENSOR_MAP`.
+pub fn register_sensor_map_hook<CTX, const CAP: usize, const MAX: usize>(
+    map: &mut RegMap<CTX, CAP, MAX>,
+    hook: crate::table::WriteHookFn<CTX>,
+) -> Result<(), crate::table::Error> {
+    map.set_write_hook(REG_SENSOR_MAP, hook)
 }
 
 /// Auto-generate a [`RegMap`] for an N-motor system from an array of [`RegisterBridge`] instances.
@@ -274,6 +294,9 @@ pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
     let topo_hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
     map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, topo_hook))
         .expect("multi_motor_profile REG_TOPOLOGY_MODE registration failed");
+    let smap_hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = sensor_map_hook::<N, B>;
+    map.add_register(RegEntry::rw_hooked(REG_SENSOR_MAP, 4, smap_hook))
+        .expect("multi_motor_profile REG_SENSOR_MAP registration failed");
     sync_rw_from_bridge_multi(&mut map);
     map
 }
@@ -924,5 +947,80 @@ mod tests {
         assert_eq!(f32::from_le_bytes(buf), 9.0);
         map.get(reg_offset(RegisterId::CurrentLimit), &mut buf).unwrap();
         assert_eq!(f32::from_le_bytes(buf), 2.25);
+    }
+
+    #[test]
+    fn test_kinematics_register_bridge_roundtrip() {
+        #[derive(Default)]
+        struct KinBridge {
+            tx_type: u8,
+            gear_ratio: f32,
+            diff_t11: f32,
+            diff_t22: f32,
+            l1: f32,
+            l2_l4: [f32; 3],
+            joint_offset_alpha: f32,
+        }
+        impl RegisterBridge for KinBridge {
+            fn read_reg(&self, id: RegisterId) -> Result<RegisterValue, barefoc_drivers::comms::registers::RegisterError> {
+                match id {
+                    RegisterId::TransmissionType => Ok(RegisterValue::U8(self.tx_type)),
+                    RegisterId::GearRatio => Ok(RegisterValue::Float(self.gear_ratio)),
+                    RegisterId::DiffMatrix_T11 => Ok(RegisterValue::Float(self.diff_t11)),
+                    RegisterId::DiffMatrix_T22 => Ok(RegisterValue::Float(self.diff_t22)),
+                    RegisterId::LinkageL1 => Ok(RegisterValue::Float(self.l1)),
+                    RegisterId::LinkageL2_L4 => Ok(RegisterValue::Float3(self.l2_l4)),
+                    RegisterId::JointOffsetAlpha => Ok(RegisterValue::Float(self.joint_offset_alpha)),
+                    _ => Err(barefoc_drivers::comms::registers::RegisterError::InvalidPayload),
+                }
+            }
+            fn write_reg(&mut self, id: RegisterId, value: RegisterValue) -> Result<(), barefoc_drivers::comms::registers::RegisterError> {
+                match (id, value) {
+                    (RegisterId::TransmissionType, RegisterValue::U8(v)) => self.tx_type = v,
+                    (RegisterId::GearRatio, RegisterValue::Float(v)) => self.gear_ratio = v,
+                    (RegisterId::DiffMatrix_T11, RegisterValue::Float(v)) => self.diff_t11 = v,
+                    (RegisterId::DiffMatrix_T22, RegisterValue::Float(v)) => self.diff_t22 = v,
+                    (RegisterId::LinkageL1, RegisterValue::Float(v)) => self.l1 = v,
+                    (RegisterId::LinkageL2_L4, RegisterValue::Float3(v)) => self.l2_l4 = v,
+                    (RegisterId::JointOffsetAlpha, RegisterValue::Float(v)) => self.joint_offset_alpha = v,
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+
+        let mut map = multi_motor_profile([KinBridge::default(), KinBridge::default()]);
+        let smap_off = REG_SENSOR_MAP.to_be_bytes();
+        map.write_phase(&[smap_off[0], smap_off[1], 3, 2, 1, 0]).unwrap();
+        let mut smap_buf = [0u8; 4];
+        map.get(REG_SENSOR_MAP, &mut smap_buf).unwrap();
+        assert_eq!(smap_buf, [3, 2, 1, 0]);
+
+        let tx_off = reg_offset(RegisterId::TransmissionType).to_be_bytes();
+        map.write_phase(&[tx_off[0], tx_off[1], 1]).unwrap();
+        let gr_off = reg_offset(RegisterId::GearRatio).to_be_bytes();
+        let mut gr_frame = [0u8; 6];
+        gr_frame[0..2].copy_from_slice(&gr_off);
+        gr_frame[2..6].copy_from_slice(&2.5f32.to_le_bytes());
+        map.write_phase(&gr_frame).unwrap();
+
+        let t11_off = reg_offset(RegisterId::DiffMatrix_T11).to_be_bytes();
+        let mut t11_frame = [0u8; 6];
+        t11_frame[0..2].copy_from_slice(&t11_off);
+        t11_frame[2..6].copy_from_slice(&0.5f32.to_le_bytes());
+        map.write_phase(&t11_frame).unwrap();
+
+        let l24_off = reg_offset(RegisterId::LinkageL2_L4).to_be_bytes();
+        let mut l24_frame = [0u8; 14];
+        l24_frame[0..2].copy_from_slice(&l24_off);
+        l24_frame[2..6].copy_from_slice(&30.0f32.to_le_bytes());
+        l24_frame[6..10].copy_from_slice(&90.0f32.to_le_bytes());
+        l24_frame[10..14].copy_from_slice(&40.0f32.to_le_bytes());
+        map.write_phase(&l24_frame).unwrap();
+
+        assert_eq!(map.handler().motors[0].tx_type, 1);
+        assert_eq!(map.handler().motors[0].gear_ratio, 2.5);
+        assert_eq!(map.handler().motors[0].diff_t11, 0.5);
+        assert_eq!(map.handler().motors[0].l2_l4, [30.0, 90.0, 40.0]);
     }
 }

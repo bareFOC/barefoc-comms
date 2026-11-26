@@ -55,7 +55,7 @@ pub mod profile;
 pub use profile::{
     multi_motor_profile, refresh_telemetry, refresh_telemetry_multi, reg_offset, simplefoc_profile,
     sync_rw_from_bridge, sync_rw_from_bridge_multi, MultiMotorState, REG_CALIB_CMD,
-    REG_MOTOR_SELECT, REG_SAVE_CONFIG, REG_TOPOLOGY_MODE,
+    REG_MOTOR_SELECT, REG_SAVE_CONFIG, REG_SENSOR_MAP, REG_TOPOLOGY_MODE,
 };
 
 #[cfg(feature = "control-table")]
