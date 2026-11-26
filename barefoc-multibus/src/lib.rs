@@ -54,7 +54,8 @@ pub mod profile;
 #[cfg(feature = "simplefoc-profile")]
 pub use profile::{
     multi_motor_profile, refresh_telemetry, refresh_telemetry_multi, reg_offset, simplefoc_profile,
-    MultiMotorState, REG_CALIB_CMD, REG_MOTOR_SELECT, REG_SAVE_CONFIG, REG_TOPOLOGY_MODE,
+    sync_rw_from_bridge, sync_rw_from_bridge_multi, MultiMotorState, REG_CALIB_CMD,
+    REG_MOTOR_SELECT, REG_SAVE_CONFIG, REG_TOPOLOGY_MODE,
 };
 
 #[cfg(feature = "control-table")]

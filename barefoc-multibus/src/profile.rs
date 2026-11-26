@@ -82,6 +82,7 @@ pub fn simplefoc_profile<B: RegisterBridge>(
     let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
     map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook))
         .expect("simplefoc_profile REG_SAVE_CONFIG registration failed");
+    sync_rw_from_bridge(&mut map);
     map
 }
 
@@ -91,6 +92,8 @@ pub struct MultiMotorState<const N: usize, B: RegisterBridge> {
     pub motors: [B; N],
     /// Currently selected motor index.
     pub selected: u8,
+    /// Set when `selected` changes so the next `refresh_telemetry_multi` re-seeds R/W slots.
+    pub rw_dirty: bool,
 }
 
 impl<const N: usize, B: RegisterBridge> MultiMotorState<N, B> {
@@ -99,6 +102,7 @@ impl<const N: usize, B: RegisterBridge> MultiMotorState<N, B> {
         Self {
             motors,
             selected: 0,
+            rw_dirty: false,
         }
     }
 
@@ -113,7 +117,10 @@ impl<const N: usize, B: RegisterBridge> MultiMotorState<N, B> {
     /// if `(index as usize) >= N` leaving `selected` unchanged.
     pub fn set_selected(&mut self, index: u8) -> bool {
         if (index as usize) < N {
-            self.selected = index;
+            if self.selected != index {
+                self.selected = index;
+                self.rw_dirty = true;
+            }
             true
         } else {
             false
@@ -267,7 +274,69 @@ pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
     let topo_hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = topology_mode_hook::<N, B>;
     map.add_register(RegEntry::rw_hooked(REG_TOPOLOGY_MODE, 1, topo_hook))
         .expect("multi_motor_profile REG_TOPOLOGY_MODE registration failed");
+    sync_rw_from_bridge_multi(&mut map);
     map
+}
+
+/// Seed all R/W register bytes in `map` from [`RegisterBridge::read_reg`].
+pub fn sync_rw_from_bridge<B: RegisterBridge, const CAP: usize, const MAX: usize>(
+    map: &mut RegMap<B, CAP, MAX>,
+) {
+    for id in RegisterId::ALL {
+        if id == RegisterId::Position
+            || id.is_read_only()
+            || id == RegisterId::MotorSelect
+            || id == RegisterId::CalibCommand
+        {
+            continue;
+        }
+        let offset = id.aligned_offset();
+        let width = id.expected_size();
+        if let Ok(val) = map.handler().read_reg(id) {
+            let mut buf = [0u8; 12];
+            if let Ok(n) = val.to_bytes(&mut buf) {
+                let _ = map.set(offset, &buf[..width.min(n)]);
+            }
+        }
+    }
+}
+
+/// Seed all R/W register bytes in `map` from the currently selected motor's [`RegisterBridge::read_reg`].
+pub fn sync_rw_from_bridge_multi<
+    const N: usize,
+    B: RegisterBridge,
+    const CAP: usize,
+    const MAX: usize,
+>(
+    map: &mut RegMap<MultiMotorState<N, B>, CAP, MAX>,
+) {
+    let selected = map.handler().selected as usize;
+    if selected >= N {
+        return;
+    }
+    for id in RegisterId::ALL {
+        if id == RegisterId::Position
+            || id.is_read_only()
+            || id == RegisterId::MotorSelect
+            || id == RegisterId::CalibCommand
+        {
+            continue;
+        }
+        let offset = id.aligned_offset();
+        let width = id.expected_size();
+        let res = if (id as u8) <= 0x6C {
+            map.handler().motors[selected].read_reg(id)
+        } else {
+            map.handler().motors[0].read_reg(id)
+        };
+        if let Ok(val) = res {
+            let mut buf = [0u8; 12];
+            if let Ok(n) = val.to_bytes(&mut buf) {
+                let _ = map.set(offset, &buf[..width.min(n)]);
+            }
+        }
+    }
+    map.handler().rw_dirty = false;
 }
 
 /// Refresh all read-only register bytes in the bank from the bridge.
@@ -295,6 +364,9 @@ pub fn refresh_telemetry<B: RegisterBridge, const CAP: usize, const MAX: usize>(
 pub fn refresh_telemetry_multi<const N: usize, B: RegisterBridge, const CAP: usize, const MAX: usize>(
     map: &mut RegMap<MultiMotorState<N, B>, CAP, MAX>,
 ) {
+    if map.handler().rw_dirty {
+        sync_rw_from_bridge_multi(map);
+    }
     let selected = map.handler().selected as usize;
     if selected >= N {
         return;
@@ -798,5 +870,59 @@ mod tests {
         assert_eq!(buf1[0], 1);
 
         assert!(client.write_register(DEV, reg_offset(RegisterId::SensorFaultStatus), &[1]).is_err());
+    }
+
+    #[test]
+    fn simplefoc_profile_seeds_rw_registers_from_bridge() {
+        let clock = NullClock;
+        let mut config = MotorConfig::new(&clock);
+        config.target = 2.75;
+        config.voltage_limit = 7.5;
+        config.current_limit = 1.25;
+        let map = simplefoc_profile(config);
+
+        let mut buf = [0u8; 4];
+        map.get(reg_offset(RegisterId::Target), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 2.75);
+        map.get(reg_offset(RegisterId::VoltageLimit), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 7.5);
+        map.get(reg_offset(RegisterId::CurrentLimit), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 1.25);
+    }
+
+    #[test]
+    fn multi_motor_profile_seeds_rw_on_init_and_motor_select() {
+        let clock = NullClock;
+        let mut c0 = MotorConfig::new(&clock);
+        c0.target = 1.125;
+        c0.voltage_limit = 6.0;
+        c0.current_limit = 1.5;
+
+        let mut c1 = MotorConfig::new(&clock);
+        c1.target = -2.5;
+        c1.voltage_limit = 9.0;
+        c1.current_limit = 2.25;
+
+        let mut map = multi_motor_profile([c0, c1]);
+
+        let mut buf = [0u8; 4];
+        map.get(reg_offset(RegisterId::Target), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 1.125);
+        map.get(reg_offset(RegisterId::VoltageLimit), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 6.0);
+        map.get(reg_offset(RegisterId::CurrentLimit), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 1.5);
+
+        // Switch to motor 1 via MotorSelect and refresh
+        let sel_off = REG_MOTOR_SELECT.to_be_bytes();
+        map.write_phase(&[sel_off[0], sel_off[1], 0x01]).unwrap();
+        refresh_telemetry_multi(&mut map);
+
+        map.get(reg_offset(RegisterId::Target), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), -2.5);
+        map.get(reg_offset(RegisterId::VoltageLimit), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 9.0);
+        map.get(reg_offset(RegisterId::CurrentLimit), &mut buf).unwrap();
+        assert_eq!(f32::from_le_bytes(buf), 2.25);
     }
 }
