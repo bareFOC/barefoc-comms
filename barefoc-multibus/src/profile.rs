@@ -26,6 +26,9 @@ pub const REG_TOPOLOGY_MODE: u16 = RegisterId::ALIGNED_SPAN + 4;
 /// Universal register offset for 4-channel SensorMap `[u8; 4]` (non-overlapping, 4-byte aligned).
 pub const REG_SENSOR_MAP: u16 = RegisterId::ALIGNED_SPAN + 8;
 
+/// Universal read-only register offset for `SUPPORTED_SENSORS_MASK` (`u16` LE bitmask, 4-byte aligned).
+pub const REG_SUPPORTED_SENSORS: u16 = RegisterId::ALIGNED_SPAN + 12;
+
 /// Return the 4-byte-aligned, non-overlapping byte offset for `id`.
 #[inline]
 pub const fn reg_offset(id: RegisterId) -> u16 {
@@ -85,6 +88,8 @@ pub fn simplefoc_profile<B: RegisterBridge>(
     let hook: crate::table::WriteHookFn<B> = save_config_hook::<B>;
     map.add_register(RegEntry::rw_hooked(REG_SAVE_CONFIG, 1, hook))
         .expect("simplefoc_profile REG_SAVE_CONFIG registration failed");
+    map.add_register(RegEntry::ro(REG_SUPPORTED_SENSORS, 2))
+        .expect("simplefoc_profile REG_SUPPORTED_SENSORS registration failed");
     sync_rw_from_bridge(&mut map);
     map
 }
@@ -297,6 +302,8 @@ pub fn multi_motor_profile<const N: usize, B: RegisterBridge>(
     let smap_hook: crate::table::WriteHookFn<MultiMotorState<N, B>> = sensor_map_hook::<N, B>;
     map.add_register(RegEntry::rw_hooked(REG_SENSOR_MAP, 4, smap_hook))
         .expect("multi_motor_profile REG_SENSOR_MAP registration failed");
+    map.add_register(RegEntry::ro(REG_SUPPORTED_SENSORS, 2))
+        .expect("multi_motor_profile REG_SUPPORTED_SENSORS registration failed");
     sync_rw_from_bridge_multi(&mut map);
     map
 }
