@@ -8,13 +8,13 @@ rust-version.workspace = true
 description = "Pure-Rust, no_std implementation of the SimpleFOC Commander ASCII serial tuning protocol."
 
 [dependencies]
-barefoc = { path = "../../bareFOC", default-features = false, features = ["boot"], optional = true }
+barefoc = { path = "../../barefoc-core", default-features = false, features = ["boot"], optional = true }
 libm = { workspace = true }
 embedded-io = { workspace = true, optional = true }
 defmt = { workspace = true, optional = true }
 
 [dev-dependencies]
-barefoc = { path = "../../bareFOC", default-features = false, features = ["boot"] }
+barefoc = { path = "../../barefoc-core", default-features = false, features = ["boot"] }
 
 embedded-io = { workspace = true }
 
